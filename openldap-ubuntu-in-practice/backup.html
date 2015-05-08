@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Резервное копирование и восстановление - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Резервное копирование и восстановление сервера OpenLDAP</p>
+
+<h1>10. Резервное копирование и восстановление сервера OpenLDAP</h1>
+<p><a href="http://pro-ldap.ru/tr/admin24/maintenance.html">Глава по обслуживанию в руководстве администратора OpenLDAP</a> не слишком подробно описывает решаемые проблемы. Будем надеятся, что этот раздел поможет Вам.</p>
+
+<h2><a name="s1"></a>10.1 Резервное копирование</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Что мы будем резервировать?</p>
+<ul>
+<li>Содержимое базы данных OpenLDAP;</li>
+<li>Конфигурацию сервера OpenLDAP;</li>
+<li>Общесистемную конфигурацию сервера.</li>
+</ul>
+<p>База данных и конфигурация сервера OpenLDAP могут быть выгружены в LDIF-файлы с помощью <strong>slapcat</strong>. Запакуем их вместе в один tar-файл. Общесистемная конфигурация&thinsp;&mdash;&thinsp;это всё остальное. Например, набор ключей Kerberos (keytab) и файл <em>/etc/defaults/slapd</em>.</p>
+<p>Создадим файл для скрипта резервного копирования, и каталоги, куда мы будем складировать данные:</p>
+<pre class="sh">
+#  mkdir -p /root/scripts /root/backup /var/log/backup
+#  touch /root/scripts/backup.slapd.sh
+#  chmod +x /root/scripts/backup.slapd.sh
+</pre>
+<p>И запишем в файл <em>backup.slapd.sh</em> несложный скрипт:</p>
+<pre class="list">
+<code>#!/bin/sh</code>
+<code></code>
+<code class="c"># Копируем данные и конфигурацию OpenLDAP в сжатые LDIF-файлы.</code>
+<code class="c"># А так же резервируем весь каталог OpenLDAP и конфигурацию демона slapd.</code>
+<code></code>
+<code>umask 022</code>
+<code></code>
+<code>PATH="/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/usr/local/sbin"</code>
+<code>export PATH</code>
+<code></code>
+<code>DATE=`date +%Y%m%d`</code>
+<code></code>
+<code>BACKUP_DIR="/root/backup/slapd"</code>
+<code>BACKUP_DATA_FILENAME="slapd.data.${DATE}.ldif"</code>
+<code>BACKUP_CONFIG_FILENAME="slapd.config.${DATE}.ldif"</code>
+<code>BACKUP_TAR_FILENAME="slapd.directory.${DATE}.tar.gz"</code>
+<code></code>
+<code>CA_TLS_CERT="/etc/ssl/certs/rootca.crt"</code>
+<code></code>
+<code>DIT_CONFIG="cn=config"</code>
+<code>DIT_SUFFIX="dc=example,dc=com"</code>
+<code></code>
+<code>SLAPD_CONFIG_FILENAME="/etc/default/slapd"</code>
+<code>SLAPD_DIR="/etc/ldap"</code>
+<code>SLAPD_LOG_ROTATION="/etc/logrotate.d/slapd"</code>
+<code>SLAPD_TLS_CERT="/etc/ldap/ssl/ldap-srv.example.com.crt"</code>
+<code>SLAPD_TLS_KEY="/etc/ldap/ssl/ldap-srv.example.com.key"</code>
+<code>SLAPCAT_OPTIONS="-F /etc/ldap/slapd.d"</code>
+<code></code>
+<code>LOGFILE="/var/log/backup/slapd.log"</code>
+<code>KEEP="30"</code>
+<code></code>
+<code class="c"># Убедимся, что скрипт запущен от имени суперпользователя</code>
+<code>if [ `id -u` -ne "0" ]; then</code>
+<code> echo "ERROR: only root can run this script." | tee -a ${LOGFILE}</code>
+<code> exit 1</code>
+<code>fi</code>
+<code></code>
+<code class="c"># Проверим, есть ли у нас файл для журнала</code>
+<code>if [ ! -f ${LOGFILE} ]; then</code>
+<code> touch ${LOGFILE}</code>
+<code></code>
+<code> if [ "$?" -ne "0" ]; then</code>
+<code> </span><span> echo "ERROR: could not create the log file."</code>
+<code> </span><span> exit 1</code>
+<code> fi</code>
+<code>fi</code>
+<code></code>
+<code class="c"># Убедимся, что у нас есть каталог для резервных копий</code>
+<code>if [ ! -d ${BACKUP_DIR} ]; then</code>
+<code> mkdir -p ${BACKUP_DIR}</code>
+<code></code>
+<code> if [ "$?" -ne "0" ]; then</code>
+<code> </span><span> echo "ERROR: could not create the backup directory." | tee -a ${LOGFILE}</code>
+<code> </span><span> exit 1</code>
+<code> fi</code>
+<code>fi</code>
+<code></code>
+<code class="c"># Убедимся, что в нашем каталоге с резервными копиями не свалено слишком много файлов</code>
+<code class="c"># и удалим все резервные копии кроме последних ${KEEP} копий.</code>
+<code>FILES=`find ${BACKUP_DIR} -type f -name "slapd.*" -print | wc -l`</code>
+<code></code>
+<code>if [ "${FILES}" -gt "${KEEP}" ]; then</code>
+<code> OVER=`echo ${FILES}-${KEEP} | bc`</code>
+<code> RMFILES=`find ${BACKUP_DIR} -type f -name "slapd.*" -print | sort -r | tail -${OVER}`</code>
+<code> echo "NOTE: removing ${RMFILES} from the backup directory." &gt;&gt; ${LOGFILE}</code>
+<code> rm ${RMFILES}</code>
+<code>fi</code>
+<code></code>
+<code class="c"># Создаём резервную копию данных из DIT</code>
+<code>slapcat ${SLAPCAT_OPTIONS} -b ${DIT_SUFFIX} -l ${BACKUP_DIR}/${BACKUP_DATA_FILENAME} &gt;/dev/null 2&gt;&amp;1</code>
+<code></code>
+<code>if [ "$?" -eq "0" ]; then</code>
+<code> gzip -f ${BACKUP_DIR}/${BACKUP_DATA_FILENAME} 2&gt;&amp;1 &gt;&gt; ${LOGFILE}</code>
+<code></code>
+<code> if [ "$?" -ne "0" ] ; then</code>
+<code> </span><span> echo "ERROR: dump file compression problem." | tee -a ${LOGFILE}</code>
+<code> </span><span> exit 1</code>
+<code> fi</code>
+<code>else</code>
+<code> echo "ERROR: problem running slapcat(8C) for the DIT data backup." | tee -a ${LOGFILE}</code>
+<code> rm ${BACKUP_DIR}/${BACKUP_DATA_FILENAME}</code>
+<code> exit 1</code>
+<code>fi</code>
+<code></code>
+<code class="c"># Сохраняем конфигурацию DIT в виде LDIF-файла</code>
+<code>slapcat ${SLAPCAT_OPTIONS} -b ${DIT_CONFIG} -l ${BACKUP_DIR}/${BACKUP_CONFIG_FILENAME} &gt;/dev/null 2&gt;&amp;1</code>
+<code></code>
+<code>if [ "$?" -eq "0" ]; then</code>
+<code> gzip -f ${BACKUP_DIR}/${BACKUP_CONFIG_FILENAME} 2&gt;&amp;1 &gt;&gt; ${LOGFILE}</code>
+<code></code>
+<code> if [ "$?" -ne "0" ] ; then</code>
+<code> </span><span> echo "ERROR: dump file compression problem." | tee -a ${LOGFILE}</code>
+<code> </span><span> exit 1</code>
+<code> fi</code>
+<code>else</code>
+<code> echo "ERROR: problem running slapcat(8C) for the DIT config backup." | tee -a ${LOGFILE}</code>
+<code> rm ${BACKUP_DIR}/${BACKUP_CONFIG_FILENAME}</code>
+<code> exit 1</code>
+<code>fi</code>
+<code></code>
+<code class="c"># Делаем резервную копию файлов каталога и конфигурации</code>
+<code>BACKUP_FILES_LIST="${CA_TLS_CERT} ${SLAPD_CONFIG_FILENAME} ${SLAPD_DIR} ${SLAPD_LOG_ROTATION} ${SLAPD_TLS_CERT} ${SLAPD_TLS_KEY}"</code>
+<code></code>
+<code>tar zcf ${BACKUP_DIR}/${BACKUP_TAR_FILENAME} ${BACKUP_FILES_LIST} &gt;/dev/null 2&gt;&amp;1</code>
+<code></code>
+<code>if [ "$?" -ne "0" ]; then</code>
+<code> echo "ERROR: problem running config directory tar." | tee -a ${LOGFILE}</code>
+<code> rm ${BACKUP_DIR}/${BACKUP_TAR_FILENAME}</code>
+<code> exit 1</code>
+<code>fi</code>
+</pre>
+<p>Создадим задание планировщика <strong>cron</strong> для нашего скрипта:</p>
+<pre class="sh">#  crontab -e</pre>
+<p>Откроется конфигурация планировщика для суперпользователя. Допишем в неё:</p>
+<pre class="list">
+<span class="c"># Резервное копирование для OpenLDAP</span>
+00 22 * * * /root/scripts/backup.slapd.sh
+</pre>
+<p>По этому правилу резервное копирование запускается каждый день в 22:00. Запустите скрипт вручную или дождитесь и проверьте, что всё работает.</p>
+<p><strong>ВНИМАНИЕ! Копируйте файлы на другой сервер!</strong> Лучше всего монтировать сетевые ресурсы в каталоги резервного копирования (в нашем случае&thinsp;&mdash;&thinsp;в <em>/root/backup</em>). Тогда все данные сразу будут заливаться на удалённый сервер.</p>
+
+<h2><a name="s2"></a>10.2 Восстановление</h2>
+<p>В случае выхода из строя сервера OpenLDAP у нас есть всё, чтобы его воскресить. Сценарий восстановления зависит от типа решаемой проблемы:</p>
+<ol>
+<li>Полная потеря сервера;</li>
+<li>Проблемы с ACL;</li>
+<li>Повреждение данных (или человеческий фактор);</li>
+<li>Исчерпано свободное место в файловой системе.</li>
+</ol>
+
+<h3><a name="s2.1"></a>10.2.1 Полная потеря сервера</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Если сервер который крутит OpenLDAP сломается, то первым делом нам нужно будет найти другой или починить этот. Затем потребуется установить на него Ubuntu 14.04. Потом скопируйте на него файлы из резервной копии и выполните следующие команды:</p>
+<pre class="sh">
+#  apt-get install -y slapd ldap-utils krb5-kdc-ldap krb5-pkinit krb5-admin-server libnss-ldapd libpam-ldapd wamerican sudo-ldap
+#  mv /etc/ldap /etc/ldap.install
+#  cd / &amp;&amp; tar zxvf /tmp/slapd.directory.20141215.tar.gz
+#  update-rc.d slapd defaults
+#  service slapd start
+</pre>
+<p>Это поможет Вам начать работать. Конечно, затем нужно будет перенастроить <strong>rsyslog</strong>. Смотрите <a href="init.html#s3">раздел 2.3</a>.</p>
+
+<h3><a name="s2.2"></a>10.2.2 Проблемы с ACL</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Чаще всего такое случается при настройке сервера. При изменении ACL Вы можете закрыть самим себе любой доступ к нему. Поправить ситуацию не сложно:</p>
+<pre class="sh">
+#  service nslcd stop
+#  service nscd stop
+#  service slapd stop
+#  mv /etc/ldap /etc/ldap.broken
+#  cd / &amp;&amp; tar zxvf /root/backup/slapd/slapd.directory.20141215.tar.gz
+#  service slapd start
+#  service nscd start
+#  service nslcd start
+</pre>
+
+<h3><a name="s2.3"></a>10.2.3 Повреждение данных (или человеческий фактор)</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Чтож, иногда и администраторы совершают ошибки. В обычной ситуации достаточно просто запустить LDAP-браузер и вернуть всё как было. Но допустим один администратор в пятницу сделал изменение и уехал заниматься альпинизмом. Другой администратор не имел ни малейшего понятия об изменениях и в субботу после обеда мы имеем сломанную конфигурацию. В таких ситуациях у среднестатистического администратора нет терпения для отладки. Поэтому самый простой (и самый быстрый!) способ исправления ошибки&thinsp;&mdash;&thinsp;<strong>остановить демон slapd</strong> и вернуть данные из резервной копии, которая была сделана в четверг, с помощью <strong>slapadd</strong>.</p>
+<pre class="sh">#  service nslcd stop
+#  service nscd stop
+#  service slapd stop
+#  mv /var/lib/ldap /var/lib/ldap.broken
+#  mkdir /var/lib/ldap
+#  zcat /root/backup/slapd/slapd.data.20141212.ldif.gz &gt; /tmp/slapd.data.ldif
+#  slapadd -v &lt; /tmp/slapd.data.ldif
+#  chown -R openldap:openldap /var/lib/ldap
+#  service slapd start
+#  service nscd start
+#  service nslcd start
+</pre>
+<p>Это вернёт данные из любого файла, в который мы сохраняли наши резервные копии.</p>
+
+<h3><a name="s2.4"></a>10.2.4 Исчерпано свободное место в файловой системе</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Вы ведь храните каталог <em>/var</em> в отдельной файловой системе (<a href="https://cce.mitre.org/lists/data/downloads/cce-rhel5-5.20100926.xls">CCE-14777-7</a>)? Иногда в нём кончается свободное место. Это может случиться как от разрастания базы данных в <em>/var/lib/ldap</em>, так и от слишком активного наполнения каталога <em>/var/log</em> журналами событий (подсказка: храните базу LDAP в отдельной ФС). Отсутствие свободного места будет генерировать ошибки в журналах. Используемый нами мехнизм манипуляции данными MDB не требует каких-либо особых процедур для восстановления из такого состояния. После вполне очевидного решения проблемы увеличения свободного места (<code>lvresize</code> / монтирование новой ФС / <code>btrfs filesystem resize</code> …) нужно просто перезапустить демоны:</p>
+<pre class="sh">
+#  service slapd restart
+#  service nscd restart
+#  service nslcd restart
+</pre>
+<p>Вот и всё! Если пропали какие-то данные, просто восстановите их из резервной копии как описано в предыдущем разделе.</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Резервное копирование и восстановление сервера OpenLDAP</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

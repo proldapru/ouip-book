@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>OpenLDAP и Ubuntu на практике</title>
+<meta name="description" content="Практическое руководство по установке и настройке OpenLDAP 2.4 в Ubuntu 14.04." />
+<meta name="keywords" content="OpenLDAP,Ubuntu,LDAP,slapd,cn=config,TLS,Kerberos,KDC,nslcd,NFS,autofs,netgroup,sudo,sudoers,syncrepl" />
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+
+<h1 style="margin:50px 20px 10px 20px">OpenLDAP и Ubuntu на практике</h1>
+<p style="margin-left:30px">Установка и настройка OpenLDAP 2.4 в Ubuntu 14.04</p>
+<div class="contents">
+<h3>Содержание</h3>
+<ul>
+<li><a href="intro.html">Введение</a></li>
+<li><a href="dns.html">1. Настройка DNS</a>
+<ul>
+<li><a href="dns.html#s1">1.1 Настройка DNS-сервера</a></li>
+<li><a href="dns.html#s2">1.2 Начальная настройка сервера и клиента LDAP</a></li>
+</ul></li>
+<li><a href="init.html">2. Установка OpenLDAP</a>
+<ul>
+<li><a href="init.html#s1">2.1 Установка пакетов</a></li>
+<li><a href="init.html#s2">2.2 Инициализация конфигурации каталога</a></li>
+<li><a href="init.html#s3">2.3 Запуск службы каталогов</a></li>
+<li><a href="init.html#s4">2.4 Подключение динамических модулей</a></li>
+<li><a href="init.html#s5">2.5 Добавление наборов схем данных</a></li>
+<li><a href="init.html#s6">2.6 Инициализация базы данных</a></li>
+</ul></li>
+<li><a href="tls.html">3. Настройка TLS (Transport Layer Security)</a>
+<ul>
+<li><a href="tls.html#s1">3.1 Удостоверяющий центр на основе самоподписанного сертификата с помощью OpenSSL</a></li>
+<li><a href="tls.html#s2">3.2 Выпуск сертификата для сервера службы каталогов</a></li>
+<li><a href="tls.html#s3">3.3 Настройка конфигурации TLS</a></li>
+<li><a href="tls.html#s4">3.4 Создание CRL и отзыв сертификатов</a></li>
+</ul></li>
+<li><a href="users.html">4. Управление пользователями и группами в OpenLDAP</a></li>
+<li><a href="auth.html">5. Настройка аутентификации пользователей через OpenLDAP на клиенте</a></li>
+<li><a href="sudo.html">6. Настройка OpenLDAP в качестве хранилища правил sudo</a>
+<ul>
+<li><a href="sudo.html#s1">6.1 Конвертация файла sudoers в конфигурацию OpenLDAP</a></li>
+<li><a href="sudo.html#s2">6.2 Настройка sudo клиента</a></li>
+</ul></li>
+<li><a href="nfs.html">7. OpenLDAP как хранилище карт автоматического монтирования для autofs</a>
+<ul>
+<li><a href="nfs.html#s1">7.1 Создание сервера NFS</a></li>
+<li><a href="nfs.html#s2">7.2 Интеграция сервера NFS с сервером каталогов</a></li>
+<li><a href="nfs.html#s3">7.3 Настройка сетевых ресурсов NFS-сервера</a></li>
+<li><a href="nfs.html#s4">7.4 Создание карт автоматического монтирования на сервере LDAP</a></li>
+<li><a href="nfs.html#s5">7.5 Настройка клиента для сервера NFS</a></li>
+</ul></li>
+<li><a href="netgroup.html">8. Репозиторий NFS netgroup на основе OpenLDAP для autofs</a>
+<ul>
+<li><a href="netgroup.html#s1">8.1 Настройка сервера OpenLDAP</a></li>
+<li><a href="netgroup.html#s2">8.2 Настройка сервера NFS</a></li>
+<li><a href="netgroup.html#s3">8.3 Настройка клиента NFS</a></li>
+<li><a href="netgroup.html#s4">8.4 Добавление новых значений атрибута nisNetgroupTriple</a>
+<ul>
+<li><a href="netgroup.html#s4.1">8.4.1 Проблема и два варианта решения</a></li>
+<li><a href="netgroup.html#s4.2">8.4.2 Третий вариант решения</a></li>
+</ul></li></ul></li>
+<li><a href="kerberos.html">9. Kerberos KDC с использованием OpenLDAP в качестве бэкэнда и аутентификацией SASL GSSAPI</a>
+<ul>
+<li><a href="kerberos.html#s1">9.1 Настройка сервера</a></li>
+<li><a href="kerberos.html#s2">9.2 Настройка клиента</a>
+<ul>
+<li><a href="kerberos.html#s2.1">9.2.1 Аутентификация Kerberos для sshd</a></li>
+<li><a href="kerberos.html#s2.2">9.2.2 Аутентификация OpenLDAP с помощью SASL GSSAPI</a></li>
+<li><a href="kerberos.html#s2.3">9.2.3 Применение аутентификации SASL GSSAPI для autoFS</a></li>
+</ul></li></ul></li>
+<li><a href="backup.html">10. Резервное копирование и восстановление сервера OpenLDAP</a>
+<ul>
+<li><a href="backup.html#s1">10.1 Резервное копирование</a></li>
+<li><a href="backup.html#s2">10.2 Восстановление</a>
+<ul>
+<li><a href="backup.html#s2.1">10.2.1 Полная потеря сервера</a></li>
+<li><a href="backup.html#s2.2">10.2.2 Проблемы с ACL</a></li>
+<li><a href="backup.html#s2.3">10.2.3 Повреждение данных (или человеческий фактор)</a></li>
+<li><a href="backup.html#s2.4">10.2.4 Исчерпано свободное место в файловой системе</a></li>
+</ul></li></ul></li>
+<li><a href="repl.html">11. Репликация сервера OpenLDAP</a>
+<ul>
+<li><a href="repl.html#s1">11.1 Настройка поставщика</a>
+<ul>
+<li><a href="repl.html#s1.1">11.1.1 Настройка cn=module</a></li>
+<li><a href="repl.html#s1.2">11.1.2 Настройка базы данных accesslog для хранения журнала доступа</a></li>
+<li><a href="repl.html#s1.3">11.1.3 Определение наложения syncprov поверх базы данных accesslog</a></li>
+<li><a href="repl.html#s1.4">11.1.4 Определение наложений поставщика syncprov и accesslog поверх основной базы данных</a></li>
+<li><a href="repl.html#s1.5">11.1.5 Новый пользователь для репликации</a></li>
+<li><a href="repl.html#s1.6">11.1.6 Ограничения и ACL пользователя для репликации</a></li>
+</ul></li>
+<li><a href="repl.html#s2">11.2 Настройка потребителя</a>
+<ul>
+<li><a href="repl.html#s2.1">11.2.1 Создание сервера-реплики</a></li>
+<li><a href="repl.html#s2.2">11.2.2 Развёртывание OpenLDAP на сервере-реплике</a></li>
+<li><a href="repl.html#s2.3">11.2.3 Первичная загрузка DIT на сервер-реплику</a></li>
+<li><a href="repl.html#s2.4">11.2.4 Запуск слубы каталогов на сервере-реплике</a></li>
+<li><a href="repl.html#s2.5">11.2.5 Настройка TLS для сервера-реплики</a></li>
+<li><a href="repl.html#s2.6">11.2.6 Настройка SASL GSSAPI для сервера-реплики</a></li>
+<li><a href="repl.html#s2.7">11.2.7 Проверка репликации</a></li>
+<li><a href="repl.html#s2.8">11.2.8 Настройка подчиненного сервера Kerberos</a></li>
+<li><a href="repl.html#s2.9">11.2.9 Резервное копирование и восстановление сервера-реплики</a></li>
+</ul></li>
+<li><a href="repl.html#s3">11.3 Проверка статуса репликации</a></li>
+<li><a href="repl.html#s4">11.4 Настройка клиента</a></li>
+<li><a href="repl.html#s5">11.5 Устранение проблем</a>
+<ul>
+<li><a href="repl.html#s5.1">11.5.1 Настройка журналирования Syncrepl</a></li>
+<li><a href="repl.html#s5.2">11.5.2 syncrepl_message_to_entry</a></li>
+</ul></li></ul></li>
+</ul>
+</div>
+
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

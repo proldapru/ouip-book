@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Хранилище правил sudo - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка OpenLDAP в качестве хранилища правил sudo</p>
+
+<h1>6. Настройка OpenLDAP в качестве хранилища правил sudo</h1>
+<p>Для начала хорошей идеей будет ознакомиться с этими источниками:</p>
+<p><a href="http://www.sudo.ws/">Официальный сайт sudo</a></p>
+<p><a href="http://www.gratisoft.us/sudo/sudoers.ldap.man.html">Руководство по sudoers и LDAP</a></p>
+<p><a href="http://www.sudo.ws/sudo/readme_ldap.html">Файл README.LDAP проекта sudo</a></p>
+<p><a href="https://wiki.archlinux.org/index.php/Sudo_(Русский)">Хорошая статья на русском в вики Archlinux про sudo</a></p>
+
+<h2><a name="s1"></a>6.1 Конвертация файла sudoers в конфигурацию OpenLDAP</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Для удобства создадим новый каталог:</p>
+<pre class="sh">
+$  mkdir ~/sudo
+$  cd ~/sudo
+</pre>
+<p>За основу возьмём вот такой вполне обычный файл с правилами <strong>sudo</strong> и сохраним его как <em>6.1-sudoers.source</em>:</p>
+<pre class="list">
+<code>Defaults  env_reset</code>
+<code>Defaults  mail_badpass</code>
+<code>Defaults  secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"</code>
+<code></code>
+<code>root      ALL=(ALL) ALL</code>
+<code></code>
+<code>%sysadmin ALL=(ALL) ALL</code>
+</pre>
+<p>Для конвертации этого файла в LDIF воспользуемся скриптом <em>/usr/share/doc/sudo-ldap/sudoers2ldif.gz</em> из пакета <strong>sudo-ldap</strong>:</p>
+<pre class="sh">
+$  zcat /usr/share/doc/sudo-ldap/sudoers2ldif.gz &gt; 6.1-sudoers2ldif
+$  SUDOERS_BASE=ou=sudo,ou=services,dc=example,dc=com perl 6.1-sudoers2ldif 6.1-sudoers.source &gt; sudoers.ldif
+</pre>
+<p>Между прочим, можно и не создавать отдельный файл <strong>6.1-sudoers.source</strong>, а просто в последней команде вместо него указать Ваш текущий <strong>/etc/sudoers</strong>. Таким образом Вы преобразуете в LDIF свою любимую конфигурацию. :)</p>
+<p>Итак, у нас теперь есть <strong>sudoers</strong> в формате LDIF. Но в нашей службе каталогов нет контейнера для правил <strong>sudo</strong>! У нас, в сущности, даже нет контейнера для служб. Поэтому добавим в начало получившегося у нас <em>6.1-sudoers.ldif</em> несколько строк для контейнера служб (первый блок строк) и входящего в него контейнера правил <strong>sudo</strong> (второй блок строк). Итоговый файл <em>6.1-sudoers.ldif</em> для <em>6.1-sudoers.source</em> будет выглядеть так:</p>
+<pre class="list">
+<code>dn: ou=services,dc=example,dc=com</code>
+<code>ou: Services</code>
+<code>objectClass: top</code>
+<code>objectClass: organizationalUnit</code>
+<code>description: Group all services under this OU</code>
+<code></code>
+<code>dn: ou=sudo,ou=services,dc=example,dc=com</code>
+<code>objectClass: organizationalUnit</code>
+<code>description: sudo</code>
+<code>objectClass: top</code>
+<code></code>
+<code>dn: cn=defaults,ou=sudo,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: sudoRole</code>
+<code>cn: defaults</code>
+<code>description: Default sudoOption's go here</code>
+<code>sudoOption: env_reset</code>
+<code>sudoOption: mail_badpass</code>
+<code>sudoOption: secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin</code>
+<code>sudoOrder: 1</code>
+<code></code>
+<code>dn: cn=root,ou=sudo,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: sudoRole</code>
+<code>cn: root</code>
+<code>sudoUser: root</code>
+<code>sudoHost: ALL</code>
+<code>sudoRunAsUser: ALL</code>
+<code>sudoCommand: ALL</code>
+<code>sudoOrder: 2</code>
+<code></code>
+<code>dn: cn=%sysadmin,ou=sudo,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: sudoRole</code>
+<code>cn: %sysadmin</code>
+<code>sudoUser: %sysadmin</code>
+<code>sudoHost: ALL</code>
+<code>sudoRunAsUser: ALL</code>
+<code>sudoCommand: ALL</code>
+<code>sudoOrder: 3</code>
+</pre>
+<p>Заметьте, директива <code>secure_path</code> определена без использования кавычек!</p>
+<p>Небольшое примечание по поводу скрипта <em>sudoers2ldif</em>. Если в Вашем <em>sudoers</em> файле встречаются строки вида
+<pre class="list">env_keep = COLORS</pre> то после всех проведённых с файлом <em>sudoers.ldif</em> манипуляций надо сделать ещё один фокус&thinsp;&mdash;&thinsp;убрать лишние пробелы. Так, чтобы получилось <pre class="list">env_keep=COLORS</pre> Иначе при загрузке LDIF мы получим ошибки. Провернуть это можно с помощью одной команды:</p>
+<pre class="sh">$  sed -i.bak -e "s/ = /=/g" -re 's/= {0,2}"/=/g' -e 's/"$//g' -e "s/p \+/p+/g" 6.1-sudoers.ldif</pre>
+<p>Загрузим нашу конфигурацию в каталог:</p>
+<pre class="sh">
+$  ldapmodify -axZZWD cn=admin,dc=example,dc=com -f 6.1-sudoers.ldif
+Enter LDAP Password:
+adding new entry "ou=services,dc=example,dc=com"
+adding new entry "ou=sudo,ou=services,dc=example,dc=com"
+adding new entry "cn=defaults,ou=sudo,ou=services,dc=example,dc=com"
+adding new entry "cn=root,ou=sudo,ou=services,dc=example,dc=com"
+adding new entry "cn=%sysadmin,ou=sudo,ou=services,dc=example,dc=com"
+</pre>
+<p>Убедимся, что обычные пользователи не могут просмотреть конфигурацию <em>sudoers</em>:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=pablo,ou=users,dc=example,dc=com -b ou=sudo,ou=services,dc=example,dc=com
+Enter LDAP Password:
+No such object (32)
+</pre>
+<p>А вот наш пользователь <strong>nssproxy</strong>, напротив, должен иметь к ней доступ:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=nssproxy,ou=users,dc=example,dc=com -b ou=sudo,ou=services,dc=example,dc=com
+Enter LDAP Password:
+dn: ou=sudo,ou=services,dc=example,dc=com
+objectClass: organizationalUnit
+...
+</pre>
+<p>Вы должны были увидеть вывод, почти идентичный содержимому файла <em>6.1-sudoers.ldif</em>. Если так, то продолжаем.</p>
+
+<h2><a name="s2"></a>6.2 Настройка sudo клиента</h2>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Теперь, когда у нас есть работающая схема <strong>sudo</strong> (<code>dn: cn={13}sudo,cn=schema,cn=config</code>) и LDAP-версия файла <em>sudoers</em>, мы можем настроить клиентские машины для запроса данных <em>sudoers</em> с сервера OpenLDAP.</p>
+<p>Прежде чем установить пакет <strong>sudo-ldap</strong> необходимо задать пароль для учетной записи <strong>root</strong>:</p>
+<pre class="sh">
+#  passwd
+Введите новый пароль UNIX:
+Повторите ввод нового пароля UNIX:
+</pre>
+<p>Установим <strong>sudo-ldap</strong>:</p>
+<pre class="sh">#  apt-get install sudo-ldap</pre>
+<p>Конфигурация LDAP для <strong>sudo</strong> по-умолчанию считывается из ссылки <em>/etc/sudo-ldap.conf</em> на <em>/etc/ldap/ldap.conf</em>. Нам это будет не очень удобно, потому что в эту конфигурацию надо снова поместить пароль <strong>nssproxy</strong>. Поэтому удалим эту символическую ссылку и заменим её на файл с таким же именем:</p>
+<pre class="sh">
+# rm /etc/sudo-ldap.conf
+# touch /etc/sudo-ldap.conf
+</pre>
+<p>Запишем в файл <em>/etc/sudo-ldap.conf</em>:</p>
+<pre class="list">
+<code>BASE    dc=example,dc=com</code>
+<code>URI     ldap://ldap-srv.example.com</code>
+<code>BINDDN  cn=nssproxy,ou=users,dc=example,dc=com</code>
+<code>BINDPW  пароль.пользователя.nssproxy</code>
+<code>TLS_CACERTFILE  /etc/ssl/certs/rootca.crt</code>
+<code>TLS_CRLFILE     /etc/ssl/rootca.crl </code>
+<code>TLS_CHECKPEER   no</code>
+<code>TIMELIMIT       15</code>
+<code>TIMEOUT         20</code>
+<code>SUDOERS_BASE    ou=sudo,ou=services,dc=example,dc=com</code>
+<code class="c">#SUDOERS_DEBUG 2</code>
+</pre>
+<p>Настроим права доступа на этот файл (в нём теперь есть пароль!):</p>
+<pre class="sh">
+#  chmod 600 /etc/sudo-ldap.conf
+#  chown root:root /etc/sudo-ldap.conf
+</pre>
+<p>Файл сертификата нашего корневого удостоверяющего центра (<em>rootca.crt</em>) мы уже скопировали на <strong>ldap-client</strong> в <a href="auth.html">разделе 5</a>.</p>
+<p>Убедимся, что в файле <em>/etc/nsswitch.conf</em> директива <code>sudoers</code> выглядит так или добавим её:</p>
+<pre class="list">sudoers:        files ldap</pre>
+<p>Проверим работоспособность наших настроек:</p>
+<pre class="sh">
+$ sudo -l -U pablo 
+Matching Defaults entries for pablo on ldap-client: 
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin, env_reset, mail_badpass, secure_path=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin:/usr/local/sbin
+ 
+User pablo may run the following commands on ldap-client: 
+    (ALL) ALL
+</pre>
+<p>Мы видим как локальные настройки <em>/etc/sudoers</em>, так и информацию из нашего каталога OpenLDAP. Значит всё работает!</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Если мы вновь заглянем в журнал <em>/var/log/slapd.log</em>, то увидим там ошибки такого вида:</p>
+<pre class="list">ldap-srv slapd[868]: &lt;= mdb_equality_candidates: (sudoUser) not indexed</pre>
+<p>Для того, чтобы это исправить сделаем вот такой небольшой LDIF-файл <em>6.2-sudoers.indexes.ldif</em> с новыми индексами:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: sudoUser eq,sub</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: sudoHost eq</code>
+</pre>
+<p>И загрузим его в каталог:</p>
+<pre class="sh">
+$  ldapmodify -axZZWD cn=admin,dc=example,dc=com  -f 6.2-sudoers.indexes.ldif
+Enter LDAP Password:
+modifying entry "olcDatabase={1}mdb,cn=config"
+</pre>
+<p>Теперь при выполнении на <strong>ldap-client</strong> команд с <code>sudo</code> ошибок в журнале сервера быть не должно. На этом реализация хранилища настроек <strong>sudo</strong> закончена.</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка OpenLDAP в качестве хранилища правил sudo</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

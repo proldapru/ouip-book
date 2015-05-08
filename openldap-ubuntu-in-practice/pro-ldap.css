@@ -1,0 +1,41 @@
+body{margin:0;padding:0 2em 2em 2em;background:white;color:#333;font-family:Verdana,sans-serif;text-align:justify;}p{margin:0.5em 0;text-indent:1em;}a{color:#215197;text-decoration:underline;}a:hover,a:focus,a:active{text-decoration:none;}dl.plbox{background:#A7C6F4;margin:0;padding:0;margin-right:10px;color:#215197;-moz-border-radius:12px;-webkit-border-radius:12px;border-radius:12px;}dl.plbox a{margin:0 3px;color:#215197;text-decoration:underline;}dl.plbox a:hover,dl.plbox a:focus,dl.plbox a:active{text-decoration:none;}dl.plbox dt{background:#649AE9;padding:6px 10px;text-align:center;color:#fff;-moz-border-radius:12px 12px 0 0;-webkit-border-radius:12px 12px 0 0;border-radius:12px 12px 0 0;}dl.plbox dd{background:transparent;padding:2px 0;margin:0;}dl.plbox dd p{margin:0;padding:4px 10px;text-indent:0;font-size:80%}div.pltab{background:#649AE9;padding:3px 0px 7px 0px;display:inline-block;-moz-border-radius:12px;-webkit-border-radius:12px;border-radius:12px;}div.pltab table th{font-size:80%;background:#649AE9;color:#fff;text-align:center;}div.pltab table td{font-size:90%;background:#fff;padding:2px;vertical-align:top;}
+
+h1,h2,h3,h4{margin:0.5em 20px;color:#A7C6F4;text-align:left;
+/*border-bottom:2px solid #8DACDD;
+margin-bottom:10px;
+padding-bottom:4px;
+font-family: 'PT Sans Narrow',sans-serif;
+font-weight:normal; 
+letter-spacing:-1px;*/
+}
+h1 a,h2 a,h3 a,h4 a{color:#A7C6F4;text-decoration:none;}
+h1 a:before,h2 a:before,h3 a:before,h4 a:before,h5 a:before,h6 a:before{
+content:"";
+display:block;
+height:30px;
+margin:-30px 0 0;}
+
+blockquote p {text-indent:0;}
+
+code {font-family:Consolas,Monaco,"Courier New",Courier,monospace;}
+
+pre.list {counter-reset:codecnt; background:#F3F3F7; border:1px solid #DEDEE3; color:#000; font-family:Consolas,Monaco,"Courier New",Courier,monospace; font-size:12px; padding:10px; margin:20px; overflow-x:auto; white-space:pre-wrap; word-wrap:break-word;}
+pre.list code:before {position:relative; counter-increment:codecnt; content:counter(codecnt,decimal-leading-zero); vertical-align: middle; font-size: 90%; font-style: normal; color:silver; color: #A7C6F4; margin-right:25px;}
+
+pre.list .c {color:grey; font-style: italic;}
+.r {color:red;}
+
+pre.sh {background:#222; border:1px solid #DEDEE3; color:#fff; font-family:Consolas,Monaco,"Courier New",Courier,monospace; font-size:12px; padding:10px; margin:20px; overflow-x:auto; white-space:pre-wrap; word-wrap:break-word; letter-spacing: 1px; padding-left:18px;}
+
+.warn {background:url("http://pro-ldap.ru/img/warn.png") no-repeat scroll 4px 4px pink; text-indent: 20px; min-height:20px; color:red; font-size:80%; padding: 4px; margin: 20px; -moz-border-radius:6px;-webkit-border-radius:6px;border-radius:6px;}
+
+.note {background:url("http://pro-ldap.ru/img/note.png") no-repeat scroll 4px 4px #649AE9; text-indent: 20px; min-height:20px; color:#fff; font-size:80%; padding: 4px; margin: 20px; -moz-border-radius:6px;-webkit-border-radius:6px;border-radius:6px;}
+
+.place {padding: 20px 0; margin:5px 20px; background-color:#eef; -moz-border-radius:6px;-webkit-border-radius:6px;border-radius:6px;}
+
+.nav {font-size:80%; margin-top: 40px;}
+
+.desc {font-size:90%;font-style:italic;margin-top:20px;margin-bottom:20px;}
+.contents ul li {list-style:none outside none;}
+.about {font-size:80%;font-style:italic;margin-top:30px;}
+

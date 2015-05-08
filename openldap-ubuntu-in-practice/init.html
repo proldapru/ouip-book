@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Установка OpenLDAP - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Установка OpenLDAP</p>
+
+<h1>2. Установка OpenLDAP</h1>
+<h2><a name="s1"></a>2.1 Установка пакетов</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Прежде чем установить пакет <strong>sudo-ldap</strong> необходимо задать пароль для учетной записи <strong>root</strong>. Пакеты <strong>sudo</strong> и <strong>sudo-ldap</strong> взаимоисключающие, поэтому нужно перестраховаться, если с их установкой или работой случится беда.</p>
+<pre class="sh">
+#  passwd
+Введите новый пароль UNIX:
+Повторите ввод нового пароля UNIX:
+</pre>
+<p>Теперь установим все необходимые пакеты. Мы сразу устанавливаем <strong>krb5-kdc-ldap</strong> и <strong>sudo-ldap</strong>, даже несмотря на то, что настроим их позже. Идея заключается в том, чтобы сразу получить необходимые схемы наборов данных OpenLDAP.</p>
+<pre class="sh">#  apt-get install slapd ldap-utils krb5-kdc-ldap sudo-ldap</pre>
+<p>Во время установки Вам будет предложено задать некоторые настройки:</p>
+<ul>
+<li>Пароль учётной записи <strong>admin</strong> для доступа к конфигурации OpenLDAP;</li>
+<li>Название области Kerberos (realm);</li>
+<li>Сервер Kerberos для нашей области;</li>
+<li>Управляющий сервер области.</li>
+</ul>
+<p>На данном этапе эти настройки не важны. Мы последовательно опишем их в дальнейшем.</p>
+<p>Прежде чем продолжить, убедитесь, что нужные пакеты установились:</p>
+<pre class="sh">
+$  dpkg --get-selections|egrep '(slapd|ldap-utils|krb5-kdc-ldap|sudo-ldap)'
+krb5-kdc-ldap                                   install
+ldap-utils                                      install
+slapd                                           install
+sudo-ldap                                       install
+</pre>
+<h2><a name="s2"></a>2.2 Инициализация конфигурации каталога</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Инициализацию конфигурации каталога мы произведём с нуля с использованием нового подхода, OLC (<code>cn=config</code>).</p>
+<p>Создайте каталог для работы со службой каталогов. У нас будет много конфигурационных файлов, неплохо бы класть их в одно место:</p>
+<pre class="sh">
+$  mkdir ~/ldap
+$  cd ~/ldap
+</pre>
+<p>Избавимся от установленных по-умолчанию конфигурации <strong>slapd</strong> и его базы данных:</p>
+<pre class="sh">
+#  service slapd stop
+#  rm -rf /etc/ldap/slapd.d
+#  rm -rf /var/lib/ldap
+</pre>
+<p>Создадим пустой каталог для нашей новой конфигурации:</p>
+<pre class="sh">#  mkdir /etc/ldap/slapd.d</pre>
+<p>Создадим файл <em>2.2-init-config.ldif</em> с новой конфигурацией и запишем в него:</p>
+<pre class="list">
+<code>dn: cn=config</code>
+<code>objectClass: olcGlobal</code>
+<code>cn: config</code>
+<code>olcPidFile: /var/run/slapd/slapd.pid</code>
+<code>olcArgsFile: /var/run/slapd/slapd.args</code>
+<code></code>
+<code>dn: olcDatabase={0}config,cn=config</code>
+<code>objectClass: olcDatabaseConfig</code>
+<code>olcDatabase: {0}config</code>
+<code>olcAccess: to *</code>
+<code>  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage</code>
+<code></code>
+<code>dn: cn=schema,cn=config</code>
+<code>objectClass: olcSchemaConfig</code>
+<code>cn: schema</code>
+</pre>
+<p>В этом файле первым делом мы определяем корневую запись DIT (Directory Information Tree), <code>cn=config</code>. С помощью директив <code>olcPidFile</code> и <code>olcArgsFile</code> мы указали, куда необходимо записать ID процесса службы каталогов и аргументы его запуска соответственно.</p>
+<p>Во втором разделе задаём служебную базу данных конфигурации <code>cn=config</code>. Мы так же добавили правило доступа (ACL, Access Control List), разрешающее манипулировать ей от имени пользователя <strong>root</strong> (uid=0, gid=0) с помощью механизма <a href="http://pro-ldap.ru/tr/admin24/sasl.html#EXTERNAL">SASL EXTERNAL</a> и идентификационной сущности IPC. Помните, что в конце каждого ACL, если не задан модификатор <code>break</code>, подразумевается наличие правила <code>by * none </code>. То есть остальной доступ к объекту в условии <code>to</code>&thinsp;&mdash;&thinsp;запрещён.</p>
+<p>Последним разделом мы добавляем в конфигурацию контейнер для наборов схем данных.</p>
+<p>Инициализируем конфигурацию:</p>
+<pre class="sh">
+#  slapadd -n 0 -F /etc/ldap/slapd.d -l 2.2-init-config.ldif
+_#################### 100.00% eta   none elapsed            none fast!
+Closing DB...
+</pre>
+<p>Модификатор <code>-n 0</code> говорит о том, что мы добавляем данные в базу данных с индексом 0, который зарезервирован для <code>cn=config</code>.</p>
+<p>Проверим, всё ли в порядке с нашей конфигурацией:</p>
+<pre class="sh">
+#  slaptest -uF /etc/ldap/slapd.d
+config file testing succeeded
+</pre>
+<p>Поправим права доступа, разрешив пользователю <strong>openldap</strong> заправлять в каталоге <em>/etc/ldap/slapd.d</em>:</p>
+<pre class="sh">
+#  chown -R openldap:openldap /etc/ldap/slapd.d
+#  chmod 750 /etc/ldap/slapd.d
+</pre>
+
+<h2><a name="s3"></a>2.3 Запуск службы каталогов</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Разрешим нашей службе каталогов использовать только IPv4. Для этого установим  <code>SLAPD_OPTIONS="-4"</code> в файле <em>/etc/default/slapd</em>. В остальном конфигурация стандартная:</p>
+<pre class="list">
+<code>SLAPD_CONF=</code>
+<code>SLAPD_USER="openldap"</code>
+<code>SLAPD_GROUP="openldap"</code>
+<code>SLAPD_PIDFILE=</code>
+<code>SLAPD_SERVICES="ldap:/// ldapi:///"</code>
+<code>SLAPD_SENTINEL_FILE=/etc/ldap/noslapd</code>
+<code><strong>SLAPD_OPTIONS="-4"</strong></code>
+</pre>
+<p>Настроим <strong>rsyslog</strong>, чтобы он писал события службы каталогов в отдельный файл. Для этого достаточно добавить три строки в его конфигурацию после глобальных директив (<em>/etc/rsyslog.conf</em>):</p>
+<pre class="list">
+<code>$ModLoad imuxsock <span class="c"># provides support for local system logging</code>
+<code>$ModLoad imklog   <span class="c"># provides kernel logging support</code>
+<code></code>
+<code>$KLogPermitNonKernelFacility on</code>
+<code></code>
+<code>$ActionFileDefaultTemplate RSYSLOG_TraditionalFileFormat</code>
+<code></code>
+<code>$RepeatedMsgReduction on</code>
+<code></code>
+<code>$FileOwner syslog</code>
+<code>$FileGroup adm</code>
+<code>$FileCreateMode 0640</code>
+<code>$DirCreateMode 0755</code>
+<code>$Umask 0022</code>
+<code>$PrivDropToUser syslog</code>
+<code>$PrivDropToGroup syslog</code>
+<code></code>
+<code>$WorkDirectory /var/spool/rsyslog</code>
+<code></code>
+<code>$IncludeConfig /etc/rsyslog.d/*.conf</code>
+<code></code>
+<code class="c"><strong># Пишем журнал демона slapd в /var/log/slapd.log</strong></code>
+<code><strong>if $programname == 'slapd' then /var/log/slapd.log</strong></code>
+<code><strong>&amp; ~</strong></code>
+</pre>
+<p>Создадим файл для журнала службы каталогов и зададим для него права доступа. Затем перезапустим <strong>rsyslog</strong>, чтобы изменения вступили в силу:</p>
+<pre class="sh">
+#  touch /var/log/slapd.log
+#  chmod 0640 /var/log/slapd.log
+#  chown syslog:adm /var/log/slapd.log
+#  service rsyslog restart
+</pre>
+<p>Настроим <strong>logrotate</strong> для управления этим журналом. Создадим файл конфигурации <em>/etc/logrotate.d/slapd</em> и запишем в него:</p>
+<pre class="list">
+<code>/var/log/slapd.log {</code>
+<code> daily</code>
+<code> missingok</code>
+<code> rotate 7</code>
+<code> compress</code>
+<code> delaycompress</code>
+<code> notifempty</code>
+<code>}</code>
+</pre>
+<p>Проверим настройку <strong>logrotate</strong>:</p>
+<pre class="sh"># logrotate -df /etc/logrotate.conf</pre>
+<p>Наконец запускаем нашу службу каталогов:</p>
+<pre class="sh">
+#  service slapd start
+ * Starting OpenLDAP slapd  [ OK ]
+</pre>
+<p>Заглянем в файл журнала <em>slapd.log</em>. Всё ли в порядке?</p>
+<pre class="sh">
+#  tail /var/log/slapd.log
+...
+slapd starting
+</pre>
+<p>Проверим, активен ли TCP порт 389:</p>
+<pre class="sh">$  ss -tan | grep 389
+LISTEN  0 128 *:389  *:*
+</pre>
+<p>Убедимся, что UNIX сокет тоже активен:</p>
+<pre class="sh">
+$  ss -xa | grep ldap
+u_str<span> LISTEN  0 128 /var/run/slapd/ldapi  44345  * 0
+</pre>
+<p>Для пущей убедительности проверим текущую конфигурацию каталога с помощью <strong>ldapsearch</strong>:</p>
+<pre class="sh">
+#  ldapsearch -QLLL -Y EXTERNAL -H ldapi:/// -b 'cn=config' dn
+dn: cn=config
+dn: cn=schema,cn=config
+dn: olcDatabase={-1}frontend,cn=config
+dn: olcDatabase={0}config,cn=config
+</pre>
+<p>Заметьте, что <strong>slapadd</strong> (из предыдущего пункта) добавил в наш каталог описание служебной базы данных <code>frontend</code> (в ней можно определить опции, которые будут применяться ко всем базам данных в текущей конфигурации OLC). Однако, если те же самые опции (в том числе правила ACL) определены в конкретной базе данных, то будут применяться именно они.</p>
+
+<h2><a name="s4"></a>2.4 Подключение динамических модулей</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Для работы нам понадобится два модуля. Один&thinsp;&mdash;&thinsp;для механизма базы данных <strong>mdb</strong>. На данный момент он рассматривается как основной для нормальных баз данных и <a href="http://pro-ldap.ru/tr/art/20130702-mdb/#r2">должен прийти на смену</a> <strong>bdb</strong> и <strong>hdb</strong>. Второй модуль&thinsp;&mdash;&thinsp;<strong>monitor</strong>, для создания и динамической поддержки ветки с информацией о текущем статусе демона <strong>slapd</strong>.</p>
+<p>Чтобы их подключить нам понадобится всего один короткий LDIF-файл и специальная запись <code>cn=module,cn=config</code>. Назовём файл <em>2.4-add-modules.ldif</em> и запишем в него:</p>
+<pre class="list">
+<code>dn: cn=module,cn=config</code>
+<code>objectClass: olcModuleList</code>
+<code>cn: module</code>
+<code>olcModulePath: /usr/lib/ldap</code>
+<code>olcModuleLoad: back_mdb.la</code>
+<code>olcModuleLoad: back_monitor.la</code>
+</pre>
+<p>Каталог с модулями в нашем случае&thinsp;&mdash;&thinsp;<em>/usr/lib/ldap</em>.</p>
+<p>Добавим наш LDIF-файл в конфигурацию:</p>
+<pre class="sh">
+#  ldapadd -QY EXTERNAL -H ldapi:/// -f 2.4-add-modules.ldif
+adding new entry "cn=module,cn=config"
+</pre>
+
+<h2><a name="s5"></a>2.5 Добавление наборов схем данных</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Прежде чем добавлять наборы схем данных в каталог, необходимо подготовить наборы схем из пакетов <strong>krb5-kdc-ldap</strong> и <strong>sudo-ldap</strong> к загрузке (перевести их в формат LDIF).</p>
+<p>В используемой нами версии Ubuntu искомые наборы схем находятся здесь:</p>
+<pre class="sh">
+/usr/share/doc/sudo-ldap/schema.OpenLDAP
+/usr/share/doc/krb5-kdc-ldap/kerberos.schema.gz
+</pre>
+<p>Скопируем их во временный каталог:</p>
+<pre class="sh">
+$  zcat /usr/share/doc/krb5-kdc-ldap/kerberos.schema.gz &gt; ~/ldap/kerberos.schema
+$  cp /usr/share/doc/sudo-ldap/schema.OpenLDAP ~/ldap/sudo.schema
+</pre>
+<p><a href="http://stuckinadoloop.wordpress.com/2011/04/14/script-to-convert-openldap-schema-files-to-ldif-format/">На просторах сети</a> был найден несложный скрипт для преобразования файлов <code>schema</code> в формат LDIF. Немного откорректируем его (для универсальности) и сохраним в том же каталоге <em>~/ldap</em> под именем <em>2.5-schema-ldif.sh</em>:</p>
+<pre class="list">
+<code>#!/bin/bash</code>
+<code></code>
+<code><strong>SCHEMAD=~/ldap</strong></code>
+<code></code>
+<code>tmpd=`mktemp -d`</code>
+<code>pushd ${tmpd} &gt;&gt;/dev/null</code>
+<code></code>
+<code><strong>echo '' &gt; convert.dat</strong></code>
+<code></code>
+<code>for schema in ${SCHEMAS} ; do</code>
+<code>    echo include ${SCHEMAD}/${schema} &gt;&gt; convert.dat</code>
+<code>done</code>
+<code></code>
+<code>slaptest -f convert.dat -F .</code>
+<code></code>
+<code>if [ $? -ne 0 ] ; then</code>
+<code>    echo "slaptest conversion failed"</code>
+<code>    exit </code>
+<code>fi</code>
+<code></code>
+<code>for schema in ${SCHEMAS} ; do</code>
+<code>    fullpath=${SCHEMAD}/${schema}</code>
+<code>    schema_name=`basename ${fullpath} .schema`</code>
+<code>    schema_dir=`dirname ${fullpath}`</code>
+<code>    ldif_file=${schema_name}.ldif</code>
+<code></code>
+<code>    find . -name *${schema_name}.ldif -exec mv '{}' ./${ldif_file} \;</code>
+<code>    sed -i "/dn:/ c dn: cn=${schema_name},cn=schema,cn=config" ${ldif_file}</code>
+<code>    sed -i "/cn:/ c cn: ${schema_name}" ${ldif_file}</code>
+<code>    sed -i '/structuralObjectClass/ d' ${ldif_file}</code>
+<code>    sed -i '/entryUUID/ d' ${ldif_file}</code>
+<code>    sed -i '/creatorsName/ d' ${ldif_file}</code>
+<code>    sed -i '/createTimestamp/ d' ${ldif_file}</code>
+<code>    sed -i '/entryCSN/ d' ${ldif_file}</code>
+<code>    sed -i '/modifiersName/ d' ${ldif_file}</code>
+<code>    sed -i '/modifyTimestamp/ d' ${ldif_file}</code>
+<code>    sed -i '/^ *$/d' ${ldif_file}</code>
+<code></code>
+<code>    mv ${ldif_file} ${schema_dir}</code>
+<code>done</code>
+<code></code>
+<code>popd &gt;&gt;/dev/null</code>
+<code>rm -rf $tmpd</code>
+</pre>
+<p>Сделаем его исполняемым и запустим, передав через переменную <code>SCHEMAS</code> имена файлов конвертируемых наборов схем:</p>
+<pre class="sh">
+$  chmod +x 2.5-schema-ldif.sh
+$  SCHEMAS='kerberos.schema sudo.schema' 2.5-schema-ldif.sh
+config file testing succeeded
+</pre>
+<p>На выходе должны получить два набора схем данных в формате LDIF:</p>
+<pre class="sh">
+$  ls ~/ldap | egrep '(kerberos.ldif|sudo.ldif)'
+kerberos.ldif
+sudo.ldif
+</pre>
+<p>Переместим  их в каталог к остальным наборам схем и поправим права доступа:</p>
+<pre class="sh">
+#  mv ~/ldap/{kerberos.ldif,sudo.ldif} /etc/ldap/schema
+#  chown root:root /etc/ldap/schema/{kerberos.ldif,sudo.ldif}
+#  chmod 0644 /etc/ldap/schema/{kerberos.ldif,sudo.ldif}
+</pre>
+<p>Удалим не нужные больше наборы схем данных:</p>
+<pre class="sh">$  rm kerberos.schema sudo.schema</pre>
+<p>Создадим LDIF-файл с необходимыми нам наборами схем данных. Порядок их следования в файле очень важен! Атрибуты наборов схем иерархически связаны и требуют их объявления с соблюдением иерархии. Назовём файл <em>2.5-add-schemas.ldif</em> и запишем в него:</p>
+<pre class="list">
+<code>include: file:///etc/ldap/schema/core.ldif</code>
+<code>include: file:///etc/ldap/schema/cosine.ldif</code>
+<code>include: file:///etc/ldap/schema/inetorgperson.ldif</code>
+<code>include: file:///etc/ldap/schema/collective.ldif</code>
+<code>include: file:///etc/ldap/schema/corba.ldif</code>
+<code>include: file:///etc/ldap/schema/duaconf.ldif</code>
+<code>include: file:///etc/ldap/schema/openldap.ldif</code>
+<code>include: file:///etc/ldap/schema/dyngroup.ldif</code>
+<code>include: file:///etc/ldap/schema/java.ldif</code>
+<code>include: file:///etc/ldap/schema/misc.ldif</code>
+<code>include: file:///etc/ldap/schema/nis.ldif</code>
+<code>include: file:///etc/ldap/schema/ppolicy.ldif</code>
+<code>include: file:///etc/ldap/schema/kerberos.ldif</code>
+<code>include: file:///etc/ldap/schema/sudo.ldif</code>
+</pre>
+<p>Последними строчками мы указали получившиеся в результате конвертации наборы схем <em>kerberos.ldif</em> и <em>sudo.ldif</em>.</p>
+<p>Добавим наши наборы схем:</p>
+<pre class="sh">
+#  ldapadd -QY EXTERNAL -H ldapi:/// -f 2.5-add-schemas.ldif
+adding new entry "cn=core,cn=schema,cn=config"
+adding new entry "cn=cosine,cn=schema,cn=config"
+adding new entry "cn=inetorgperson,cn=schema,cn=config"
+adding new entry "cn=collective,cn=schema,cn=config"
+adding new entry "cn=corba,cn=schema,cn=config"
+adding new entry "cn=duaconf,cn=schema,cn=config"
+adding new entry "cn=openldap,cn=schema,cn=config"
+adding new entry "cn=dyngroup,cn=schema,cn=config"
+adding new entry "cn=java,cn=schema,cn=config"
+adding new entry "cn=misc,cn=schema,cn=config"
+adding new entry "cn=nis,cn=schema,cn=config"
+adding new entry "cn=ppolicy,cn=schema,cn=config"
+adding new entry "cn=kerberos,cn=schema,cn=config"
+adding new entry "cn=sudo,cn=schema,cn=config"
+adding new entry "cn=autofs,cn=schema,cn=config"
+</pre>
+
+<h2><a name="s6"></a>2.6 Инициализация базы данных</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Вот мы и подошли к созданию базы данных, в которой будем хранить нашу рабочую информацию.</p>
+<p>Для начала создадим пароль администратора. Утилита <strong>slappasswd</strong> генерирует посоленный хэш вводимого нами пароля:</p>
+<pre class="sh">
+# slappasswd -h '{SSHA}'
+New password:
+Re-enter new password:
+{SSHA}RMjrfsi7NkpBMR+NQHTDk4iddvo/2le+
+</pre>
+<p>Не забудьте сам пароль! :)</p>
+<p>Сформируем конфигурационный LDIF-файл для нашей базы данных (<em>2.6-db.ldif</em>) и запишем получившийся хэш в атрибут <code>olcRootPW</code>:</p>
+<pre class="list">
+<code>dn: olcDatabase=mdb,cn=config</code>
+<code>objectClass: olcMdbConfig</code>
+<code>olcDatabase: mdb</code>
+<code>olcSuffix: dc=example,dc=com</code>
+<code>olcDbDirectory: /var/lib/ldap</code>
+<code>olcDbMaxsize: 1073741824</code>
+<code>olcRootDN: cn=admin,dc=example,dc=com</code>
+<code>olcRootPW: {SSHA}RMjrfsi7NkpBMR+NQHTDk4iddvo/2le+</code>
+<code>olcAccess: {0}to *</code>
+<code>  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage</code>
+<code>  by * break</code>
+<code>olcAccess: {1}to attrs=userPassword</code>
+<code>  by self write</code>
+<code>  by anonymous auth</code>
+<code>olcAccess: {2}to *</code>
+<code>  by self read</code>
+<code></code>
+<code>dn: olcDatabase=monitor,cn=config</code>
+<code>objectClass: olcDatabaseConfig</code>
+<code>olcDatabase: monitor</code>
+</pre>
+<p>И вновь несколько комментариев...</p>
+<ul>
+<li>В качестве механизма манипуляции данными выбираем ранее подключенный модуль <strong>mdb</strong>.</li>
+<li>В качестве суффикса (корневой записи) создаваемого DIT (Directory Information Tree) обычно используется имя домена DNS. Но это не является обязательным. Для примера мы задали суффикс <code>dc=example,dc=com</code>.</li>
+<li>В атрибуте <code>olcDbDirectory</code> мы указали путь к каталогу бузы данных. Атрибут обязательный и требует существование каталога на момент загрузки в базу данных.</li>
+<li>Механизм <strong>mdb</strong> требует указания максимального размера базы данных. Он задается в байтах и должен быть больше её ожидаемого размера, даже с учётом прироста. В файловой системе должно быть достаточно свободного места для размещения базы данных такого размера.</li>
+<li>В атрибут <code>olcRootDN</code> мы записываем DN администратора нашей базы данных.</li>
+<li>Для пользователя, указанного в атрибуте <code>olcRootDN</code>, задавать правило в ACL не нужно, он обладает полным доступом к данным в вашей базе. Поэтому постарайтесь сохранить его пароль в надежном месте (например, используя <a href="http://keepass.info/">keepass</a> или <a href="https://www.gnupg.org/">gpg</a>).</li>
+<li>Добавляем три правила доступа для базы данных <strong>mdb</strong>:
+<ul>
+<li>Доступ ко всей базе данных:
+<ul>
+<li>Разрешить доступ пользователю <strong>root</strong> с использованием механизма <a href="http://pro-ldap.ru/tr/admin24/sasl.html#EXTERNAL">SASL EXTERNAL</a>.</li>
+<li>Продолжить анализ ACL, если нет совпадений с субъектами доступа, указанными с помощью директивы <code>by</code>.</li>
+</ul></li>
+<li>Доступ к атрибуту <code>userPassword</code>:
+<ul>
+<li>Разрешить доступ для смены пароля самим пользователем.</li>
+<li>Разрешить доступ для аутентификации.</li>
+</ul></li>
+<li>Доступ к остальной базе данных:
+<ul>
+<li>Разрешить пользователям просматривать свои записи (важно для аутентификации через <strong>nslcd</strong>, <a href="auth.html">раздел 5</a>).</li>
+</ul></li></ul></li>
+<li>С помощью механизма <strong>monitor</strong> включаем мониторинг базы данных (добавляем базу данных <code>monitor</code>).</li>
+</ul>
+<p>Для нашей базы данных необходимо создать каталог и задать ему права доступа:</p>
+<pre class="sh">
+#  mkdir /var/lib/ldap
+#  chown openldap:openldap /var/lib/ldap
+#  chmod 0700 /var/lib/ldap
+</pre>
+<p>Загрузим конфигурацию базы данных:</p>
+<pre class="sh">
+#  ldapadd -QY EXTERNAL -H ldapi:/// -f 2.6-db.ldif
+adding new entry "olcDatabase=mdb,cn=config"
+adding new entry "olcDatabase=monitor,cn=config"
+</pre>
+<p>Определим RootDN для доступа к конфигурации службы каталогов. Он будет ссылаться на RootDN, находящийся в нашей БД. Эта запись желательна только при первоначальной настройке или в тестовой конфигурации. Не оставляйте её в боевой системе! Для <code>{-1}frontend</code> зададим минимально необходимые права для доступа к <a href="http://pro-ldap.ru/tr/zytrax/apd/#rootdse">RootDSE</a>. Создадим LDIF-файл <em>2.6-acl-mod.ldif</em>, модифицирующий права доступа:</p>
+<pre class="list">
+<code>dn: olcDatabase={0}config,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcRootDN</code>
+<code>olcRootDN: cn=admin,dc=example,dc=com</code>
+<code></code>
+<code>dn: olcDatabase={-1}frontend,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcAccess</code>
+<code>olcAccess: {0}to *</code>
+<code>  by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage</code>
+<code>  by * break</code>
+<code>olcAccess: {1}to dn.base=""</code>
+<code>  by * read</code>
+<code>olcAccess: {2}to dn.base="cn=subschema"</code>
+<code>  by * read</code>
+</pre>
+<p>Загрузим LDIF, изменяющий ACL:</p>
+<pre class="sh">
+#  ldapadd -QY EXTERNAL -H ldapi:/// -f 2.6-acl-mod.ldif
+modifying entry "olcDatabase={-1}frontend,cn=config"
+modifying entry "olcDatabase={0}config,cn=config"
+</pre>
+<p>Теперь мы ещё больше повысили значимость учётной записи администратора. С её помощью теперь можно получить полный доступ к службе каталогов. Имейте это ввиду. :)</p>
+<p>Проверим корректность всех ACL и, заодно, наличие всех добавленных нами данных (вывод отформатирован для наглядности):</p>
+<pre class="sh">#  ldapsearch -QLLL -Y EXTERNAL -H ldapi:/// -b 'cn=config' dn olcAccess
+dn: cn=config
+
+dn: cn=module{0},cn=config
+
+dn: cn=schema,cn=config
+dn: cn={0}core,cn=schema,cn=config
+dn: cn={1}cosine,cn=schema,cn=config
+dn: cn={2}inetorgperson,cn=schema,cn=config
+dn: cn={3}collective,cn=schema,cn=config
+dn: cn={4}corba,cn=schema,cn=config
+dn: cn={5}duaconf,cn=schema,cn=config
+dn: cn={6}openldap,cn=schema,cn=config
+dn: cn={7}dyngroup,cn=schema,cn=config
+dn: cn={8}java,cn=schema,cn=config
+dn: cn={9}misc,cn=schema,cn=config
+dn: cn={10}nis,cn=schema,cn=config
+dn: cn={11}ppolicy,cn=schema,cn=config
+dn: cn={12}kerberos,cn=schema,cn=config
+dn: cn={13}sudo,cn=schema,cn=config
+
+dn: olcDatabase={-1}frontend,cn=config
+olcAccess: {0}to *
+  by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external ,cn=auth manage
+  by * break
+olcAccess: {1}to dn.base=""
+  by * read
+olcAccess: {2}to dn.base="cn=subschema"
+  by * read
+
+dn: olcDatabase={0}config,cn=config
+olcAccess: {0}to *
+  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external ,cn=auth" manage
+
+dn: olcDatabase={1}mdb,cn=config
+olcAccess: {0}to *
+  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external ,cn=auth" manage
+  by * break
+olcAccess: {1}to attrs=userPassword
+  by self write
+  by anonymous auth
+olcAccess: {2}to *
+  by self read
+
+dn: olcDatabase={2}monitor,cn=config
+</pre>
+<p>Убедимся, что учётная запись администратора имеет доступ к нашей службе каталогов:</p>
+<pre class="sh">
+$  ldapwhoami -WD cn=admin,dc=example,dc=com
+Enter LDAP Password:
+dn:cn=admin,dc=example,dc=com
+</pre>
+<p>Отлично! Теперь у нас есть работающий сервер OpenLDAP.</p>
+<p>Отредактируем файл <em>/etc/ldap/ldap.conf</em>. Это нужно только для того, чтобы немного упростить себе жизнь и меньше печатать в дальнейшем. В <code>BASE</code> подставьте свой суффикс, а в <code>URI</code>&thinsp;&mdash;&thinsp;FQDN Вашего сервера OpenLDAP:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv.example.com</code>
+<code class="c"># TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code class="c"># TLS_REQCERT demand</code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+</pre>
+<p>С настройкой TLS  мы разберемся в следующем разделе.</p>
+<p>И последний штрих. Добавим демон нашей службы каталогов в автозагрузку:</p>
+<pre class="sh">#  update-rc.d slapd defaults</pre>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Установка OpenLDAP</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

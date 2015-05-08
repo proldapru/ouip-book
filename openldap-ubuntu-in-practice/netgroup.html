@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Репозиторий NFS netgroup - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Репозиторий NFS netgroup на основе OpenLDAP для autofs</p>
+
+<h1>8. Репозиторий NFS netgroup на основе OpenLDAP для autofs</h1>
+<p>В этом разделе мы настроим сервер каталогов для хранения конфигурации NFS <strong>netgroup</strong>. Это механизм разграничения доступа к сетевым ресурсам. Затем мы настроим клиента NFS, чтобы проверить, что наша конфигурация <strong>netgroup</strong> действительно работает.</p>
+<p><strong>ВНИМАНИЕ!</strong> Прежде чем переходить к следующему разделу и добавлять группы <strong>oracle</strong> и <strong>itdept</strong>, ознакомьтесь с проблемой, описанной в разделе 8.4. Для того, чтобы она у Вас не появилась, можете прямо сейчас выполнить инструкции раздела 8.4.2 и потом вернуться сюда. А можете и не выполнять. Зависит от того, является ли это проблемой в Вашем конкретном случае.</p>
+
+<h2><a name="s1"></a>8.1 Настройка сервера OpenLDAP</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Нам понадобится схема наборов данных <a href="https://ru.wikipedia.org/wiki/Network_Information_Service">Network Information Service (NIS)</a>. В <a href="init.html#s5">разделе 2.5</a> мы уже добавили её в конфигурацию сервера каталогов. Проверим, что она на месте:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=schema,cn=config dn | grep nis
+Enter LDAP Password:
+dn: cn={10}nis,cn=schema,cn=config
+</pre>
+<p>Проверим, содержит ли эта схема атрибуты для <strong>netgroup</strong>:</p>
+<pre class="sh">
+$ sudo ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn={10}nis,cn=schema,cn=config | grep NAME | cut -d' ' -f5 | grep -i netgroup
+Enter LDAP Password:
+'memberNisNetgroup'
+'nisNetgroupTriple'
+'nisNetgroup'
+</pre>
+<p>Хорошо. Но у нас пока нет никаких записей, которые используют эти атрибуты. Создадим LDIF-файл <em>8.1-netgroup.ldif</em>, который добавит в службу каталогов контейнер для конфигураций <strong>netgroup</strong> и несколько примеров групп <strong>netgroup</strong>:</p>
+<pre class="list">
+<code class="c"># Контейнер для конфигураций netgroup</code>
+<code>dn: ou=netgroup,ou=services,dc=example,dc=com</code>
+<code>ou: netgroup</code>
+<code>objectClass: top</code>
+<code>objectClass: organizationalUnit</code>
+<code>description: NFS Netgroups</code>
+<code></code>
+<code class="c"># Первый пример группы netgroup</code>
+<code>dn: cn=oracle,ou=netgroup,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: nisNetgroup</code>
+<code>cn: oracle</code>
+<code>nisNetgroupTriple: (oracle.example.com,,)</code>
+<code>description: All Oracle machines</code>
+<code></code>
+<code class="c"># Второй пример группы netgroup</code>
+<code>dn: cn=itdept,ou=netgroup,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: nisNetgroup</code>
+<code>cn: itdept</code>
+<code>nisNetgroupTriple: (ldap-client.example.com,,)</code>
+<code>description: IT department machines</code>
+</pre>
+<p><strong>Будьте осторожны с использованием <a href="https://ru.wikipedia.org/wiki/FQDN">FQDN</a> в наборах netgroup!</strong></p>
+<p>Если Вы сделаете это неверно, ничего не заработает. Например, такая запись ошибочна:</p>
+<pre class="list">nisNetgroupTriple: (ldap-client.example.com,,example.com)</pre>
+<p>А такая запись&thinsp;&mdash;&thinsp;верная:</p>
+<pre class="list">nisNetgroupTriple: (ldap-client.example.com,,)</pre>
+<p>Такой вариант записи тоже допускается:</p>
+<pre class="list">nisNetgroupTriple: (ldap-client,,example.com)</pre>
+<p>Выберите синтаксис, который больше по душе, и придерживайтесь его.</p>
+<p>Добавим новые записи в службу каталогов:</p>
+<pre class="sh">
+$  ldapadd -xZZWD cn=admin,dc=example,dc=com -f 8.1-netgroup.ldif
+Enter LDAP Password:
+adding new entry "ou=netgroup,ou=services,dc=example,dc=com"
+adding new entry "cn=oracle,ou=netgroup,ou=services,dc=example,dc=com"
+adding new entry "cn=itdept,ou=netgroup,ou=services,dc=example,dc=com"
+</pre>
+<h2><a name="s2"></a>8.2 Настройка сервера NFS</h2>
+<p class="place">Где работаем: <strong>nfs-srv</strong></p>
+<p>Наш сервер NFS уже интегрирован с сервером каталогов в соответствии с <a href="nfs.html">разделом 7</a>. Нижеследующие манипуляции без этого не заработают.</p>
+<p>Измените значение конфигурации <code>netgroup</code> в файле <em>/etc/nsswitch.conf</em>, чтобы информация о группах <strong>netgroup</strong> запрашивалась только у сервера каталогов:</p>
+<pre class="list">netgroup: ldap</pre>
+<p>Проверим, что возвращает запрос конфигурации <strong>netgroup</strong> к нашему серверу каталогов:</p>
+<pre class="sh">
+$ getent netgroup
+Перечисление не поддерживается для netgroup
+</pre>
+<p>Хм, интересно. Так как <strong>netgroup</strong>, в сущности,&thinsp;&mdash;&thinsp;механизм безопасности, у нас не получится просмотреть весь их список сразу. Значит, надо проверить их по-отдельности:</p>
+<pre class="sh">
+$ getent netgroup oracle
+oracle                (oracle.example.com,,)
+$ getent netgroup itdept
+itdept                (ldap-client.example.com,,)
+</pre>
+<p>Вот так выглядит запись о событии запроса <code>getent netgroup itdept</code> в журнале <em>slapd.log</em> на сервере каталогов:</p>
+<pre class="list">
+slapd[870]: conn=1448 op=2 SRCH base="dc=example,dc=com" scope=2 deref=0 filter="(&amp;(objectClass=nisNetgroup)(cn=itdept))"
+slapd[870]: conn=1448 op=2 SRCH attr=cn nisNetgroupTriple memberNisNetgroup
+slapd[870]: conn=1448 op=2 SEARCH RESULT tag=101 err=0 nentries=1 text=
+</pre>
+<p>Теперь изменим файл с записями экспортируемых каталогов <em>/etc/exports</em>, чтобы он выглядел так:</p>
+<pre class="list">
+<code>/export/home    @itdept(rw,no_subtree_check)</code>
+<code>/export/install @itdept(rw,no_subtree_check)</code>
+</pre>
+<p>Обратите внимание, что мы определили нашу новую группу с помощью знака <code>@</code>. Клиентская машина <strong>ldap-client</strong>&thinsp;&mdash;&thinsp;часть этой группы <strong>netgroup</strong>. Поэтому она должна иметь возможность монтировать указанные каталоги. Но прежде чем мы это проверим, нужно обновить конфигурацию демона NFS:</p>
+<pre class="sh">
+#  service nfs-kernel-server reload
+$  showmount -e
+Export list for nfs-srv.example.com:
+/export/install @itdept
+/export/home    @itdept
+</pre>
+<p>Теперь можем протестировать наши новые группы <strong>netgroup</strong> на клиентской машине <strong>ldap-client</strong>.</p>
+
+<h2><a name="s3"></a>8.3 Настройка клиента NFS</h2>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Подключитесь к клиентской машине. <strong>Используйте пользователя, чей домашний каталог не находится в /nfs/home!</strong></p>
+<pre class="sh">$  ssh pablo@ldap-client.example.com</pre>
+<p>В <a href="nfs.html">разделе 7</a> мы уже настроили эту машину в качестве клиента NFS с использованием <strong>autofs</strong>. Теперь посмотрим, можем ли мы автоматически монтировать каталог <em>/nfs/home</em> с новыми настройками сервера NFS. Первым делом изменим конфигурацию <code>netgroup</code> в <em>/etc/nsswitch.conf</em>, чтобы она выглядела так:</p>
+<pre class="list">netgroup: ldap</pre>
+<p>Проверим, есть ли у нас доступ к записям <strong>netgroup</strong> на сервере каталогов:</p>
+<pre class="sh">
+$  getent netgroup itdept
+itdept                   (ldap-client.example.com,,)
+</pre>
+<p>Хорошо. Теперь удостоверимся, что <em>/nfs/home</em> не примонтирован. <strong>ВНИМАНИЕ! Не выполняйте нижеследующую команду от имени пользователя, домашний каталог которого находится в /nfs/home!</strong></p>
+<pre class="sh">#  umount /nfs/home</pre>
+<p>Проверим, анонсирует ли сервер NFS ресурсы, доступные для группы <strong>itdept</strong>:</p>
+<pre class="sh">$  showmount -e nfs-srv.example.com
+Export list for nfs-srv.example.com:
+/export/install @itdept
+/export/home    @itdept
+</pre>
+<p>Анонсирует. Следовательно, мы должны иметь возможность примонтировать их:</p>
+<pre class="sh">
+$ cd /nfs/home
+$ df -h .
+Файл.система                     Размер Использовано  Дост Использовано% Cмонтировано в
+nfs-srv.example.com:/export/home   3,6G         1,6G  1,8G           47% /nfs/home
+</pre>
+<p>Отлично! Работает. Но сработает ли автоматическое монтирование, если у нас нет доступа? Для этого понадобится отмонтировать каталоги <em>/nfs/home</em> и <em>/nfs/install</em> на клиенте:</p>
+<pre class="sh">
+#  umount /nfs/home
+#  umount /nfs/install
+</pre>
+<p>Перейдём на сервер NFS и изменим настройки доступа к сетевым ресурсам.</p>
+<p class="place">Где работаем: <strong>nfs-srv</strong></p>
+<p>Отредактируем файл <em>/etc/exports</em>, изменив группу <strong>netgroup</strong>:</p>
+<pre class="list">
+<code>/export/home    @oracle(rw,no_subtree_check)</code>
+<code>/export/install @oracle(rw,no_subtree_check)</code>
+</pre>
+<p>Мы заменили группу <strong>itdept</strong>, в которую входит машина <strong>ldap-client.example.com</strong> на группу <strong>oracle</strong>, в которую эта машина не входит. Теперь машина <strong>ldap-client.example.com</strong> не сможет получить доступ к сетевым ресурсам. Но чтобы изменения вступили в силу, нужно перезагрузить сервис NFS:</p>
+<pre class="sh">
+#  service nfs-kernel-server reload
+$  showmount -e
+Export list for nfs-srv.example.com:
+/export/home  @oracle
+</pre>
+<p>Вернёмся на клиентскую машину и попробуем получить доступ к ресурсам, анонсируемым <strong>nfs-srv</strong>. <strong>Напоминаю, надо использовать учётную запись пользователя, домашний каталог которого не лежит в /nfs/home!</strong></p>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Попробуем открыть каталог <em>/nfs/home</em>:</p>
+<pre class="sh">
+$ cd /nfs/home
+-bash: cd: /nfs/home: Нет такого файла или каталога
+</pre>
+<p>Отлично! Это значит, что наши группы <strong>netgroup</strong> работают.</p>
+
+<h2><a name="s4"></a>8.4 Добавление  новых значений атрибута nisNetgroupTriple</h2>
+<p>Этот раздел справочный. Для дальнейших экспериментов он играет роль постольку-поскольку.</p>
+
+<h3><a name="s4.1"></a>8.4.1 Проблема и два варианта решения</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Я столкнулся со следующей проблемой. При попытке добавить новое значение атрибута <code>nisNetgroupTriple</code> в запись <code>cn=itdept,ou=netgroup,ou=services,dc=example,dc=com</code> появляется ошибка. Возьмём в качестве примера вот такой LDIF файл <em>8.4.1-ldap-client2-netgroup.ldif</em>:</p>
+<pre class="list">
+<code>dn: cn=itdept,ou=netgroup,ou=services,dc=example,dc=com</code>
+<code>changetype: modify</code>
+<code>add: nisNetgroupTriple</code>
+<code>nisNetgroupTriple: (ldap-client2.example.com,,)</code>
+</pre>
+<p>При попытке его загрузить в сервер каталогов мы увидим ошибку:</p>
+<pre class="sh">
+$  ldapadd -xZZWD cn=admin,dc=example,dc=com -f 8.4.1-ldap-client2-netgroup.ldif
+Enter LDAP Password:
+modifying entry "cn=itdept,ou=netgroup,ou=services,dc=example,dc=com"
+ldap_modify: Inappropriate matching (18)
+        additional info: modify/add: nisNetgroupTriple: no equality matching rule
+</pre>
+<p>После <a href="http://www.openldap.org/lists/openldap-software/200401/msg00392.html">небольших</a> <a href="http://lists.alioth.debian.org/pipermail/pkg-openldap-devel/2007-August/001438.html">поисков</a>, стало понятно, что это не ошибка, а ограничение схемы данных <code>nis</code>. Два возможных пути в такой ситуации:</p>
+<ol>
+<li>Длинный путь. Удалить ветку с определеним группы в контейнере <code>ou=netgroup,ou=services,dc=example,dc=com</code> целиком и создать её заново с новыми наборами <code>nisNetgroupTriple</code>.</li>
+<li>Короткий путь. Создать и загрузить в сервер каталогов файл LDIF, переопределяющий все наборы <code>nisNetgroupTriple</code>, вроде такого:</li>
+</ol>
+<pre class="list">
+<code>dn: cn=itdept,ou=netgroup,ou=services,dc=example,dc=com</code>
+<code>changetype: modify</code>
+<code>replace: nisNetgroupTriple</code>
+<code>nisNetgroupTriple: (ldap-client.example.com,,)</code>
+<code>nisNetgroupTriple: (ldap-client2.example.com,,)</code>
+</pre>
+<p>Несмотря на то, что данные способы работают, использовать их повседневно может быть накладно. Вариант&thinsp;&mdash;&thinsp; написать какой-нибудь скрипт, автоматизирующий этот процесс, но лучше прибегнуть к ещё одному способу.</p>
+
+<h3><a name="s4.2"></a>8.4.2 Третий вариант решения</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Есть третий путь, который позволит нам добавлять/удалять наборы <code>nisNetgroupTriple</code>. Он требует модификации схемы данных <code>nis</code>. Однако тут мы вновь сталкиваемся с неудобством. Перед изменением схемы придётся удалить все записи, в которых есть атрибут <code>nisNetgroupTriple</code>, потому что мы собираемся изменить определение этого атрибута.</p>
+<p>Вот <strong>diff</strong> оригинальной и модифицированной схемы с парой строк контекста (<code>-C 1</code>), чтобы было видно, где были произведены изменения:</p>
+<pre class="sh">
+#  diff -C 1 cn\=\{10\}nis.ldif.original cn\=\{10\}nis.ldif.modified
+*** cn={10}nis.ldif.original 2012-05-17 17:26:18.479629651 -0400
+--- cn={10}nis.ldif.modified 2012-05-17 17:28:46.289627851 -0400
+***************
+*** 33,35 ****
+  olcAttributeTypes: {12}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr
+!  oup triple' SYNTAX 1.3.6.1.1.1.0.0 )
+  olcAttributeTypes: {13}( 1.3.6.1.1.1.1.15 NAME 'ipServicePort' EQUALITY intege
+--- 33,35 ----
+  olcAttributeTypes: {12}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr
+!  oup triple' EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 ) 
+  olcAttributeTypes: {13}( 1.3.6.1.1.1.1.15 NAME 'ipServicePort' EQUALITY intege
+</pre>
+<p>Как мы можем видеть, изменение объекта <code>nisNetgroupTriple</code> довольно тривиальное.</p>
+<p>Но произвести это изменение&thinsp;&mdash;&thinsp;задача не очень тривиальная.</p>
+<p>Для начала удалим все дочерние записи у <code>ou=netgroup,ou=services,dc=example,dc=com</code>:</p>
+<pre class="sh">
+$  ldapdelete -xZZWD cn=admin,dc=example,dc=com  cn=oracle,ou=netgroup,ou=services,dc=example,dc=com
+$  ldapdelete -xZZWD cn=admin,dc=example,dc=com  cn=itdept,ou=netgroup,ou=services,dc=example,dc=com
+</pre>
+<p>Посмотрим, какой порядковый номер у схемы данных <code>nis</code> в нашем каталоге:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=schema,cn=config dn |grep nis
+Enter LDAP Password:
+dn: cn={10}nis,cn=schema,cn=config
+</pre>
+<p>Так, номер 10. Теперь посмотрим, какой порядковый номер у атрибута <code>nisNetgroupTriple</code> в схеме данных <code>nis</code>:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=schema,cn=config | grep nisNetgroupTriple
+Enter LDAP Password:
+olcAttributeTypes: {12}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr
+  a netgroup' SUP top STRUCTURAL MUST cn MAY ( nisNetgroupTriple $ memberNisNe
+</pre>
+<p>Номер 12. Замечательно. Сформируем новый LDIF под названием <em>8.4.2-nis-schema-change.ldif</em> для изменения схемы. Если два последних номера у Вас отличаются&thinsp;&mdash;&thinsp;подставьте свои значения:</p>
+<pre class="list">
+<code>dn: cn={<strong>10</strong>}nis,cn=schema,cn=config</code>
+<code>changetype: modify</code>
+<code>delete: olcAttributeTypes</code>
+<code>olcAttributeTypes: {<strong>12</strong>}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr</code>
+<code> oup triple' SYNTAX 1.3.6.1.1.1.0.0 )</code>
+<code>-</code>
+<code>add: olcAttributeTypes</code>
+<code>olcAttributeTypes: {<strong>12</strong>}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr</code>
+<code> oup triple' EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )</code>
+</pre>
+<p>Загрузим его в наш сервер каталогов:</p>
+<pre class="sh">$  ldapadd -xZZWD cn=admin,dc=example,dc=com  -f nis-schema-change.ldif</pre>
+<p>И проверим результат:</p>
+<pre class="sh">
+$ ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn={10}nis,cn=schema,cn=config olcAttributeTypes |grep -A 1 nisNetgroupTriple
+Enter LDAP Password:
+olcAttributeTypes: {12}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr
+ oup triple' <strong>EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26</strong> )
+</pre>
+<p>Отлично! Схема данных обновлена. Теперь можем добавлять новые записи в группы <strong>netgroup</strong> по одной без каких-либо проблем. Это особенно удобно при работе с каталогом из GUI какого-нибудь LDAP-браузера (пример&thinsp;&mdash;&thinsp;Apache Directory Studio). Если Вы пришли в этот раздел прямиком из начала раздела 8, то можете продолжить в <a href="#s1">8.1</a>. Если Вы уже проделывали все предыдущие пункты, то остаётся только вернуть на место группы <strong>netgroup</strong>. Следуя нашим примерам, вернуть их  можно с помощью такого нехитрого файла LDIF (<em>8.4.2-netgroup-addentryonly.ldif</em>):</p>
+<pre class="list">
+<code>dn: cn=oracle,ou=netgroup,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: nisNetgroup</code>
+<code>cn: oracle</code>
+<code>nisNetgroupTriple: (oracle.example.com,,)</code>
+<code>description: All Oracle machines</code>
+<code></code>
+<code>dn: cn=itdept,ou=netgroup,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: nisNetgroup</code>
+<code>cn: itdept</code>
+<code>nisNetgroupTriple: (ldap-client.example.com,,)</code>
+<code>description: IT department machines</code>
+</pre>
+<p>Загрузим его в наш сервер каталогов:</p>
+<pre class="sh">$  ldapadd -xZZWD cn=admin,dc=example,dc=com  -f netgroup-addentryonly.ldif</pre>
+<p><a href="kerberos.html">Следующий раздел</a> опишет, как развернуть область (realm) Kerberos с использованием OpenLDAP в качестве хранилища принципалов (principal). Это будет очень весело! Потому что как только у нас есть область Kerberos, мы можем использовать её для безопасной аутентификации в ssh, для защиты соединений с OpenLDAP с помощью SASL GSSAPI, для защиты запросов NFS на автоматическое монтирование и самого доступа к сетевым ресурсам. И много для чего ещё!</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Репозиторий NFS netgroup на основе OpenLDAP для autofs</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

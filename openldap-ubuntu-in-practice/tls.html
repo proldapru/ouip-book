@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Настройка TLS - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка TLS (Transport Layer Security)</p>
+
+<h1>3. Настройка TLS (Transport Layer Security)</h1>
+<p>В наши дни <a href="http://pro-ldap.ru/tr/admin24/tls.html">использование TLS</a> является практически обязательным. TLS реализует защитные функции конфиденциальности и целостности данных, а так же служит для поддержки аутентификации LDAP с использованием механизма SASL EXTERNAL. TLS определён в <a href="http://tools.ietf.org/html/rfc4346">RFC4346</a>.</p>
+<p>Для настройки TLS на сервере нам понадобятся SSL сертификат и ключ. Сертификат должен быть подписан доверенным <a href="https://ru.wikipedia.org/wiki/Центр_сертификации">удостоверяющим центром (УЦ, Certificate Authority, CA)</a> или собственным удостоверяющим центром (на основе «самоподписанного», self-signed, сертификата), если используется в тестовых целях.</p>
+<p>С помощью <a href="https://www.openssl.org/">OpenSSL</a> мы создадим импровизированный удостоверяющий центр и затем настроим TLS.</p>
+<p>Прямая цитата из Википедии:</p>
+<blockquote>
+<p>Сертификаты, как правило, используются для обмена зашифрованными данными в больших сетях. <a href="https://ru.wikipedia.org/wiki/Криптосистема_с_открытым_ключом">Криптосистема с открытым ключом</a> решает проблему обмена <a href="https://ru.wikipedia.org/wiki/Ключ_%28криптография%29">секретными ключами</a> между участниками безопасного обмена, однако не решает проблему доверия к открытым ключам. Предположим, что Алиса, желая получать зашифрованные сообщения, генерирует пару ключей, один из которых (открытый) она публикует каким-либо образом. Любой, кто желает отправить ей конфиденциальное сообщение, имеет возможность зашифровать его этим ключом, и быть уверенным, что только она (так как только она обладает соответствующим секретным ключом) сможет это сообщение прочесть. Однако описанная схема ничем не может помешать злоумышленнику Давиду создать пару ключей, и опубликовать свой открытый ключ, выдав его за ключ Алисы. В таком случае Давид сможет расшифровывать и читать, по крайней мере, ту часть сообщений, предназначенных Алисе, которые были по ошибке зашифрованы его открытым ключом.</p>
+<p>Идея сертификата&thinsp;&mdash;&thinsp;это наличие третьей стороны, которой доверяют две другие стороны информационного обмена. Предполагается, что таких третьих сторон немного, и их открытые ключи всем известны каким-либо способом, например, хранятся в операционной системе или публикуются в журналах. Таким образом, подлог открытого ключа третьей стороны легко выявляется.</p>
+<p>Если Алиса сформирует сертификат со своим публичным ключом, и этот сертификат будет подписан третьей стороной (например, Трентом), любой, доверяющий Тренту, сможет удостовериться в подлинности открытого ключа Алисы. В <a href="https://ru.wikipedia.org/wiki/Инфраструктура_открытых_ключей">централизованной инфраструктуре</a> в роли Трента выступает <a href="https://ru.wikipedia.org/wiki/Центр_сертификации">удостоверяющий центр</a>. В сетях доверия Трент может быть любым пользователем, и следует ли доверять этому пользователю, удостоверившему ключ Алисы, решает сам отправитель сообщения.</p>
+</blockquote>
+
+<h2><a name="s1"></a>3.1 Удостоверяющий центр на основе самоподписанного сертификата с помощью OpenSSL</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Итак, мы создаём централизованную инфраструктуру открытых ключей (PKI) в миниатюре. Для этого сформируем пару закрытый ключ/корневой сертификат удостоверяющего центра. Причём сертификат будет подписан этим же закрытым ключом (т. е. станет «самоподписанным»).</p>
+<p>Затем сгенерируем новый закрытый ключ для нашей службы каталогов и создадим для неё сертификат, подписанный закрытым ключом нашего удостоверяющего центра. При этом клиенские рабочие станции должны знать только корневой сертификат. Используя его они могут установить безопасное соединение с любым сервером, который имеет закрытый ключ и соответствующий ему сертификат, подписанный нашим УЦ.</p>
+<p>Такие пары (ключ/сертификат) можно создавать для множества задач. Например, в разделе, посвященном репликации, мы создадим второй сервер каталогов, которому тоже понадобится такая пара. </p>
+<p>Удостоверяющий центр желательно разворачивать на отдельной машине, не имеющей подключения к сети, но для простоты примера мы проделаем всю работу на <strong>ldap-srv.example.com</strong>.</p>
+<p>Создадим каталог для нашего удостоверяющего центра (CA) и установим безопасные права доступа. Затем зададим значение <code>umask</code> таким, чтобы вновь создаваемые файлы имели права доступа чтения и записи только для создавшего их пользователя:</p>
+<pre class="sh">
+#  mkdir /root/CA
+#  chmod u=rwx,g=,o= /root/CA
+#  cd /root/CA
+#  umask 066
+</pre>
+<p>В конфигурационном файле <em>/etc/ssl/openssl.cnf</em> в секции <code>[ CA_default ]</code> для удобства поменяем значение директивы <code>dir = ./demoCA</code> на <code>dir = ./</code>. В этом же разделе директивой <code>default_days</code> задаётся срок действия выпускаемых сертификатов. Можете поменять её значение по своему усмотрению.</p>
+<p>Файлы <em>index.txt</em> и <em>serial</em> будут играть роль своеобразной базы данных, чтобы отслеживать статус выпущенных закрытых ключей и сертификатов.</p>
+<p>Создадим структуру каталогов и файлов для своего удостоверяющего центра:</p>
+<pre class="sh">
+#  mkdir certs crl newcerts private
+#  chmod 700 private
+#  touch index.txt
+#  echo 1000 &gt; serial
+</pre>
+<p>Сгенерируем закрытый ключ удостоверяющего центра (длиной 4096 бит). Он должен хранится особенно бережно. Поэтому мы защитим его при помощи шифра <a href="https://ru.wikipedia.org/wiki/Advanced_Encryption_Standard">AES</a>. Вам будет предложено ввести пароль для доступа к новому закрытому ключу. Запомните его и не потеряйте. Это последний рубеж защиты от злоумышленника. Без пароля выпустить новые сертификаты не получится.</p>
+<pre class="sh">#  openssl genrsa -aes256 -out private/rootca.key 4096</pre>
+<p>Изменим права доступа к новому ключу, чтобы ненароком его не стереть:</p>
+<pre class="sh">#  chmod 400 private/rootca.key</pre>
+<p>Откройте конфигурационный файл OpenSSL (<em>openssl.cnf</em>) и найдите секции <code>[ usr_cert ]</code> и <code>[ v3_ca ]</code>. Убедитесь, что в них присутствуют следующие директивы:</p>
+<pre class="list">
+<code>[ usr_cert ]</code>
+<code class="c"># Эти расширения будут добавлены при подписывании запроса нашим УЦ.</code>
+<code>basicConstraints=CA:FALSE</code>
+<code>keyUsage = nonRepudiation, digitalSignature, keyEncipherment</code>
+<code>nsComment = "OpenSSL Generated Certificate"</code>
+<code>subjectKeyIdentifier=hash</code>
+<code>authorityKeyIdentifier=keyid,issuer</code>
+<code></code>
+<code>[ v3_ca ]</code>
+<code class="c"># Расширения для типового УЦ</code>
+<code>subjectKeyIdentifier=hash</code>
+<code>authorityKeyIdentifier=keyid:always,issuer</code>
+<code>basicConstraints = CA:true</code>
+<code>keyUsage = cRLSign, keyCertSign</code>
+</pre>
+<p>Сейчас мы можем выпустить корневой сертификат удостоверяющего центра, подписав его закрытым ключом <em>rootca.key</em>. Так как это сертификат УЦ, используем расширение <code>v3_ca</code>:</p>
+<pre class="sh">
+#  openssl req -sha256 -new<span class="T32"> -x509</span> -days 3650 -extensions v3_ca \
+ -key private/rootca.key -out certs/rootca.crt \
+ -subj /C=RU/ST=Moscow/L=Moscow/O=ExampleInc/OU=ITdept/CN=ca-server/emailAddress=support@example.com
+#  chmod 444 certs/rootca.crt
+</pre>
+<p>В качестве алгоритма хэширования мы используем <a href="https://ru.wikipedia.org/wiki/SHA-2">SHA-2</a> (подвид SHA-256). Стоимость <a href="https://www.schneier.com/blog/archives/2012/10/when_will_we_se.html">атаки</a> на SHA-1 <a href="http://www.opennet.ru/opennews/art.shtml?num=40534">стремительно падает</a>, а о практическом применении новоявленного <a href="https://ru.wikipedia.org/wiki/Keccak">SHA-3</a> говорить пока рано. Почему мы выбрали именно SHA-256, а не SHA-512? С сертификатом, использующим SHA-512, Вы сможете запустить демон <strong>slapd</strong>, но не сможете к нему подключиться. Увидите лишь такую многозначную <a href="https://www.calmblue.net/blog/server/linux/openldap-server-on-debian-using-olc">ошибку</a>:</p>
+<pre class="sh">can't connect: A TLS packet with unexpected length was received...</pre>
+<p>Мы так же указываем количество дней, в течении которых сертификат будет действителен. Десять лет&thinsp;&mdash;&thinsp;достаточно большой срок.</p>
+<p>С помощью модификатора <code>subj</code> заносим в сертификат информацию:</p>
+<ul>
+<li>C - Country Name (страна) - RU</li>
+<li>ST - State or Province Name (штат или провинция) - Moscow</li>
+<li>L - Locality Name (город) - Moscow</li>
+<li>O - Organization Name (наименование организации) - ExampleInc</li>
+<li>OU - Organizational Unit Name (наименование подразделения) - ITdept</li>
+<li>CN - Common Name (имя субъекта или FQDN сервера) - ca-server</li>
+<li>emailAddress - Email Address (адрес электронной почты) - support@example.com</li>
+</ul>
+<p>Можем посмотреть содержимое сертификата следующей командой:</p>
+<pre class="sh">#  openssl x509 -in certs/rootca.crt -noout -text</pre>
+<p>Удостоверяющий центр готов к выпуску сертификатов.</p>
+
+<h2><a name="s2"></a>3.2 Выпуск сертификата для сервера службы каталогов</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Как правило, закрытые ключи клиентов УЦ не должны хранится в самом УЦ. Клиент может сам сформировать ключевую пару и прислать в УЦ лишь запрос на подпись (Certificate Signing Request, CSR). Запрос содержит открытый ключ. Однако мы будем создавать все ключи и хранить их в одном месте. В организации, которая серьёзно подходит к проблемам безопасности такой процесс работы может быть неприемлемым.</p>
+<p>Продолжаем в том же каталоге <em>/root/CA</em>. Создадим закрытый ключ для сервера службы каталогов:</p>
+<pre class="sh">
+#  openssl genrsa -out private/ldap-srv.example.com.key 4096
+#  chmod 400 private/ldap-srv.example.com.key
+</pre>
+<p>Сгенерируем запрос на подпись сертификата. Наименование организации (<strong>ExampleInc</strong>) должно совпадать с наименованием в корневом сертификате УЦ. В качестве <code>Common Name</code> укажем FQDN нашего сервера:</p>
+<pre class="sh">
+#  openssl req -sha256 -new \
+        -key private/ldap-srv.example.com.key -out certs/ldap-srv.example.com.csr \
+        -subj /C=RU/ST=Moscow/L=Moscow/O=ExampleInc/OU=ITdept/CN=ldap-srv.example.com/emailAddress=support@example.com
+</pre>
+<p>Следующим шагом должно быть подписание запроса CSR существующим доверенным удостоверяющим центром (например, <a href="https://www.verisigninc.com/">VeriSign</a>) в обмен на деньги. Но нам не хочется платить за эту услугу, или у нас нет своего (корпоративного) CA, или это просто тестовая конфигурация, а может нам просто всё равно. Поэтому мы подпишем его с помощью своего собственного CA:</p>
+<pre class="sh">
+#  openssl ca -extensions usr_cert -notext -md sha256 \
+ -keyfile private/rootca.key -cert certs/rootca.crt \
+ -in certs/ldap-srv.example.com.csr -out certs/ldap-srv.example.com.crt
+#  chmod 444 certs/ldap-srv.example.com.crt
+</pre>
+<p>Создадим каталог для ключевой информации нашего сервера и поместим туда получившиеся у нас файлы:</p>
+<pre class="sh">
+#  mkdir /etc/ldap/ssl
+#  chown openldap:openldap /etc/ldap/ssl
+#  chmod 0500 /etc/ldap/ssl
+#  cp certs/ldap-srv.example.com.crt private/ldap-srv.example.com.key /etc/ldap/ssl
+</pre>
+<p>Установим права доступа для ключевой информации:</p>
+<pre class="sh">
+#  chown openldap:openldap /etc/ldap/ssl/{ldap-srv.example.com.crt,ldap-srv.example.com.key}
+#  chmod 0400 /etc/ldap/ssl/{ldap-srv.example.com.crt,ldap-srv.example.com.key}
+</pre>
+<p>Поместим корневой сертификат в каталог с сертификатами операционной системы и зададим для него права доступа:</p>
+<pre class="sh">
+#  cp certs/rootca.crt /etc/ssl/certs/
+#  chmod 0644 /etc/ssl/certs/rootca.crt
+</pre>
+<p>В заключение можем удалить запрос CSR, он нам больше не нужен:</p>
+<pre class="sh">#  rm -rf certs/ldap-srv.example.com.csr</pre>
+<p>Каталог <em>/root/CA</em> теперь выполняет роль удостоверяющего центра. Аналогичным образом его можно создать на другой машине, тогда надо будет копировать секретные ключи и подписанные сертификаты по сети с помощью <strong>scp</strong> или через съёмный носитель. Неплохой идеей будет хранить этот каталог на отдельном носителе и монтировать его только для выпуска новых сертификатов. Сам носитель можно, например, положить в сейф. Процесс создания новых пар ключ-сертификат в будущем будет состоять из трёх этапов:</p>
+<ol>
+<li>Генерация секретного ключа и запроса на подписание сертификата;</li>
+<li>Подписание сертификата с помощью закрытого ключа нашего CA (<em>rootca.key</em>);</li>
+<li>Перемещение новых секретного ключа и подписанного сертификата в каталоги, где они будут использоваться.</li>
+</ol>
+
+<h2><a name="s3"></a>3.3 Настройка конфигурации TLS</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Вернёмся во временный каталог:</p>
+<pre class="sh">$ cd ~/ldap</pre>
+<p>Создадим LDIF-файл <em>3.2-tls-config.ldif</em> для внесения в каталог конфигурации TLS и запишем в него:</p>
+<pre class="list">
+<code>dn: cn=config</code>
+<code>add: olcTLSVerifyClient</code>
+<code>olcTLSVerifyClient: never</code>
+<code>-</code>
+<code>add: olcTLSCertificateFile</code>
+<code>olcTLSCertificateFile: /etc/ldap/ssl/ldap-srv.example.com.crt</code>
+<code>-</code>
+<code>add: olcTLSCertificateKeyFile</code>
+<code>olcTLSCertificateKeyFile: /etc/ldap/ssl/ldap-srv.example.com.key</code>
+<code>-</code>
+<code>add: olcTLSCACertificateFile</code>
+<code>olcTLSCACertificateFile: /etc/ssl/certs/rootca.crt</code>
+</pre>
+<p>Этими записи говорят демону <strong>slapd</strong>, где лежит его сертификат и ключ, где лежит корневой сертификат УЦ и что от клиентов требовать наличие сертификата не нужно. Чтобы окончательно всё запутать, мы могли бы создать сертификаты для всех клиентов. В реальной жизни такая аутентификация клиента принесёт небольшое усиление защиты за счёт большого увеличения работы по сопровождению всех этих сертификатов. Тем более далее в этом руководстве мы опишем механизмы аутентификации Kerberos.</p>
+<p>Загрузим конфигурацию TLS в наш каталог:</p>
+<pre class="sh">
+#  ldapmodify -QY EXTERNAL -H ldapi:/// -f 3.2-tls-config.ldif
+modifying entry "cn=config"
+</pre>
+<p>Теперь наш сервер OpenLDAP должен поддерживать расширения TLS. Перепроверим, что всё в порядке:</p>
+<pre class="sh">#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b cn=config -s base | grep -i tls
+olcTLSCertificateFile: /etc/ldap/ssl/ldap-srv.example.com.crt
+olcTLSCertificateKeyFile: /etc/ldap/ssl/ldap-srv.example.com.key
+olcTLSCACertificateFile: /etc/ssl/certs/rootca.crt
+olcTLSVerifyClient: never
+</pre>
+<p>Вновь отредактируем конфигурационный файл <em>/etc/ldap/ldap.conf</em> и включим поддержку TLS:</p>
+<pre class="list">
+<code>BASE            dc=example,dc=com</code>
+<code>URI             ldap://ldap-srv.example.com</code>
+<code>TLS_CACERT      /etc/ssl/certs/rootca.crt</code>
+<code>TLS_REQCERT     demand</code>
+<code>TIMELIMIT       15</code>
+<code>TIMEOUT         20</code>
+</pre>
+<p>Обычно для конфигурации <code>cn=config</code> перезагрузка службы не требуется, но чтобы созданная нами ключевая информация «подхватилась», придётся это сделать:</p>
+<pre class="sh">
+#  service slapd restart
+ * Stopping OpenLDAP slapd  [ OK ]
+ * Starting OpenLDAP slapd  [ OK ]
+</pre>
+<p>Проверьте соединение с сервером с использованием TLS (модификатор <code>-ZZ</code>). На этот раз мы выполним запрос с использованием DN нашего администратора:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=config -s base
+Enter LDAP Password:
+dn: cn=config
+objectClass: olcGlobal
+cn: config
+olcArgsFile: /var/run/slapd/slapd.args
+olcPidFile: /var/run/slapd/slapd.pid
+olcTLSCACertificateFile: /etc/ssl/certs/rootca.crt
+olcTLSCertificateFile: /etc/ldap/ssl/ldap-srv.example.com.crt
+olcTLSCertificateKeyFile: /etc/ldap/ssl/ldap-srv.example.com.key
+olcTLSVerifyClient: never
+</pre>
+<p>Обратите внимание, что в запросе <strong>ldapsearch</strong> нам не пришлось указывать имя хоста (<code>-H ldap://ldap-srv.example.com</code>).  Всё потому что оно указано в файле <em>/etc/ldap/ldap.conf</em>. Что касается TLS, то во время инициирования соединения клиент (на данном этапе клиентский запрос выполняет сам сервер) получает от сервера его подписанный сертификат (<strong>ldap-srv.example.com.crt</strong>). Клиент может ничего не знать о сервере, но у него есть сертификат CA (<em>rootca.crt</em>), с помощью которого и проверяется сервер.</p>
+
+<h2><a name="s4"></a>3.4 Создание CRL и отзыв сертификатов</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Сертификаты не вечны. Во-первых при создании задаётся его срок действия. При этом частота обновления сертификатов&thinsp;&mdash;&thinsp;баланс между безопасностью и удобством. Во-вторых он может быть скомпрометирован, если скомпрометирован его закрытый ключ. Как во втором случае оповестить субъектов доступа, что сертификат более не действителен? Для этого и служит Certificate Revocation List (CRL). Он представляет собой список серийных номеров отозванных сертификатов, подписанный УЦ, который их выпустил.</p>
+<p>Вернёмся в каталог удостоверяющего центра:</p>
+<pre class="sh">#  cd /root/CA</pre>
+<p>Прежде чем мы сможем сгенерировать CRL, надо создать файл <em>crlnumber</em>. Он нужен <strong>openssl</strong>, чтобы отслеживать номер следующего CRL:</p>
+<pre class="sh">#  echo 1000 &gt; crlnumber</pre>
+<p>В стандартной конфигурации <strong>openssl</strong> использует CRL V1. Раскомментируйте строку
+<pre class="list">crl_extensions = crl_ext</pre>
+в <em>/etc/ssl/openssl.cnf</em>, чтобы переключиться на CRL V2. Это хорошая идея, за исключением тех случаев, когда надо использовать именно CRL V1 (например, при использовании сильно устаревшего браузера). Создаём CRL:</p>
+<pre class="sh">#  openssl ca -keyfile private/rootca.key -cert certs/rootca.crt  -gencrl -out crl/rootca.crl</pre>
+<p>Посмотреть результат можно так:</p>
+<pre class="sh">#  openssl crl -in crl/rootca.crl -text</pre>
+<p>Предположим, что закрытый ключ сервера <strong>ldap-srv</strong> был скомпрометирован. Чтобы оповестить об этом клиентские машины, надо отозвать сертификат  этого сервера, создать CRL, а затем&thinsp;&mdash;&thinsp;распространить CRL среди клиентов.</p>
+<p>Отзываем сертификат:</p>
+<pre class="sh">#  openssl ca -keyfile private/rootca.key -cert certs/rootca.crt -revoke certs/ldap-srv.example.com.crt</pre>
+<p>Заглянем в <em>index.txt</em>. Начало записи с нашим сертификатом теперь изменилось с <code>V</code> на <code>R</code>:</p>
+<pre class="sh">
+# cat index.txt
+R 160116072355Z 150119081313Z 1000 unknown /C=RU/ST=Moscow/O=ExampleInc/OU=ITdept/CN=ldap-srv.example.com/emailAddress=support@example.com
+</pre>
+<p>Обратите внимание, что копии новых сертификатов так же содержатся в каталоге <em>newcerts</em>. При этом имя файла содержит серийный номер сертификата. Когда отзываете сертификаты, вместо файлов в каталоге <em>certs</em> Вы можете пользоваться каталогом <em>newcerts</em>. Результат будет идентичен. Например:</p>
+<pre class="sh">#  openssl ca -keyfile private/rootca.key -cert certs/rootca.crt -revoke newcerts/1000.pem</pre>
+<p>Обновим CRL:</p>
+<pre class="sh">#  openssl ca -keyfile private/rootca.key -cert certs/rootca.crt -gencrl -out crl/rootca.crl</pre>
+<p>Взглянём на содержимое CRL:</p>
+<pre class="sh">#  openssl crl -in crl/rootca.crl -text</pre>
+<p>Вы должны увидеть нечто подобное:</p>
+<pre class="sh">
+...
+Revoked Certificates:
+    Serial Number: 1000
+        Revocation Date: ...
+</pre>
+<p>Поместим CRL в каталог, где его увидит клиентское ПО:</p>
+<pre class="sh">#  cp crl/rootca.crl /etc/ssl</pre>
+<p>Осталось только распространить этот CRL среди клиентов. Мы делаем это простым путём&thinsp;&mdash;&thinsp;копированием файлов по сети вручную.</p>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>На каждой клиентской машине надо будет запустиь:</p>
+<pre class="sh">
+#  scp user@ldap-srv.example.com:/etc/ssl/certs/rootca.crt /etc/ssl/certs
+#  scp user@ldap-srv.example.com:/etc/ssl/rootca.crl /etc/ssl/
+</pre>
+<p>Настроим клиентскую конфигурацию в <em>/etc/ldap/ldap.conf</em> и укажем, где хранится CRL:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv.example.com</code>
+<code>TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code>TLS_REQCERT demand</code>
+<code><strong>TLS_CRLFILE /etc/ssl/rootca.crl</strong></code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+</pre>
+<p>И попробуем получить доступ к серверу каталогов:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=config -s base dn
+ldap_start_tls: Connect error (-11)
+        additional info: (unknown error code)
+</pre>
+<p>Наш CRL работает. Но к <strong>slapd</strong> теперь не подключиться. Надо выпустить новый сертификат для сервера.</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Сделаем это простой последовательностью команд. Мы повторяем пройденное, комментарии излишни:</p>
+<pre class="sh">
+#  cd /root/CA
+#  openssl genrsa -out private/ldap-srv.example.com.key 4096
+#  chmod 400 private/ldap-srv.example.com.key
+#  openssl req -sha256 -new \
+        -key private/ldap-srv.example.com.key -out certs/ldap-srv.example.com.csr \
+        -subj /C=RU/ST=Moscow/L=Moscow/O=ExampleInc/OU=ITdept/CN=ldap-srv.example.com/emailAddress=support@example.com
+#  openssl ca -extensions usr_cert -notext -md sha256 \
+ -keyfile private/rootca.key -cert certs/rootca.crt \
+ -in certs/ldap-srv.example.com.csr -out certs/ldap-srv.example.com.crt
+#  chmod 444 certs/ldap-srv.example.com.crt
+#  cp certs/ldap-srv.example.com.crt private/ldap-srv.example.com.key /etc/ldap/ssl
+#  chown openldap:openldap /etc/ldap/ssl/{ldap-srv.example.com.crt,ldap-srv.example.com.key}
+#  chmod 0400 /etc/ldap/ssl/{ldap-srv.example.com.crt,ldap-srv.example.com.key}
+</pre>
+<p>Перезупустим демон <strong>slapd</strong> и убедимся, что к серверу можно подключиться:</p>
+<pre class="sh">
+#  service slapd restart
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=config -s base dn
+Enter LDAP Password:
+dn: cn=config
+</pre>
+<p>В целом по отзыву сертификатов... Иногда в реальных условиях лучше применить другой подход. Намного удобней, когда клиентские машины самостоятельно выясняют у сервера, действителен конкретный сертификат или нет. В выпускаемые сертификаты <a href="https://www.openssl.org/docs/apps/x509v3_config.html#crl_distribution_points_">можно вносить запись</a> <code>CRL Distribution Points</code>. Она заставит клиентов самих периодически скачивать новый CRL. Или можно <a href="http://backreference.org/2010/05/09/ocsp-verification-with-openssl/">использовать</a> <a href="https://en.wikipedia.org/wiki/Online_Certificate_Status_Protocol">OCSP</a>. Но эта тема выходит за рамки данного руководства.</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка TLS (Transport Layer Security)</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

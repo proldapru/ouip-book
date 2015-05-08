@@ -1,0 +1,1091 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Репликация - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Репликация сервера OpenLDAP</p>
+
+<h1>11. Репликация сервера OpenLDAP</h1>
+<p>Для организации репликации нашего DIT понадобится развернуть второй сервер OpenLDAP. Новую виртуальную машину назовём <strong>ldap-srv-repl</strong>. В соответствии с терминологией Syncrepl, мы будем работать со следующими сущностями:</p>
+<ul>
+<li>поставщик (provider): <strong>ldap-srv.example.com</strong> (мастер-сервер);</li>
+<li>потребитель (consumer): <strong>ldap-srv-repl.example.com</strong> (сервер-реплика).</li>
+</ul>
+<p>Первая задача&thinsp;&mdash;&thinsp;прочитать <a href="http://pro-ldap.ru/tr/admin24/replication.html">раздел о репликации в руководстве администратора OpenLDAP</a>. Отдельный интерес представляет следующий отрывок:</p>
+<blockquote>Syncrepl поддерживает синхронизацию как на основе запросов, так и на основе посылок. В его базовом режиме синхронизации <code>refreshOnly</code> (только обновление), поставщик использует синхронизацию на основе запросов, не требующей отслеживания серверов-потребителей и хранения истории операций. Информация, которая нужна поставщику для обработки периодических запросов на проверку содержимого каталога, находится в синхронизационных куки самих запросов. Для оптимизации синхронизации на основе запросов, Syncrepl использует фазу наличия (present phase) и фазу удаления (delete phase) протокола LDAP Sync, вместо того, чтобы возвращаться к частым полным перезагрузкам содержимого каталога. Для дальнейшей оптимизации синхронизации на основе запросов поставщик может вести журнал в рамках сессии в качестве хранилища истории операций. В режиме синхронизации <code>refreshAndPersist</code> (обновление и непрерывность) поставщик использует синхронизацию на основе посылок. Поставщик отслеживает серверы-потребители, запросившие непрерывно-действующий поиск, и посылает им необходимые обновления по мере изменения реплицируемого содержимого каталога поставщика.</blockquote>
+<p>Репликация реализуется через <a href="http://pro-ldap.ru/tr/admin24/overlays.html">наложения OpenLDAP</a>. Ознакомьтесь с инструкцией <a href="http://pro-ldap.ru/tr/man/slapo-syncprov.5.html"><strong>slapo-syncprov</strong></a> в документации <strong>man</strong>. В ней представлена информация о наложении поставщика репликации. С её помощью мы настроим репликацию в режиме <code>refreshAndPersist</code> с использованием схемы <a href="http://pro-ldap.ru/tr/admin24/replication.html#Delta-syncrepl">дельта-syncrepl</a>. Обратите внимание, что говорит официальная документация:</p>
+<blockquote>Как видите, в использовании Syncrepl и <strong>slapd-ldap</strong>(8) Вы можете позволить разгуляться своему воображению, адаптируя технологии репликации к своей конкретной сетевой топологии.</blockquote>
+
+<h2><a name="s1"></a>11.1 Настройка поставщика</h2>
+<p>Настройка дельта-syncrepl предполагает работу и с поставщиком (мастер-сервер), и с потребителем (сервер-реплика). Для начала займёмся поставщиком. У нас это <strong>ldap-srv.example.com</strong>.</p>
+<p>План действий по настройке поставщика:</p>
+<ol>
+<li>Настройка <a href="http://pro-ldap.ru/tr/admin24/slapdconf2.html#cn=module">cn=module</a>;</li>
+<li>Настройка базы данных <strong>accesslog</strong> для хранения <a href="http://pro-ldap.ru/tr/admin24/overlays.html#Access%20Logging">журнала доступа</a> (<code>cn=accesslog</code>);</li>
+<li>Определение <a href="http://pro-ldap.ru/tr/admin24/overlays.html#Sync%20Provider">наложения <strong>syncprov</strong></a> поверх базы данных <strong>accesslog</strong>;</li>
+<li>Определение наложений поставщика <strong>syncprov</strong> и <strong>accesslog</strong> поверх основной базы данных (<code>dc=example,dc=com</code>);</li>
+<li>Новый пользователь для репликации (аутентификация и выгрузка данных);</li>
+<li><a href="http://pro-ldap.ru/tr/admin24/limits.html">Ограничения</a> и ACL пользователя для репликации.</li>
+</ol>
+
+<h3><a name="s1.1"></a>11.1.1 Настройка cn=module</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Чтобы подключить динамические модули для наложений <strong>accesslog</strong> и <strong>syncprov</strong> не помешает проверить, как подключены уже имеющиеся модули. Мы делали это в разделе 2.4. Воспользуемся настроенным Kerberos и механизмом аутентификации SASL GSSAPI, чтобы упростить наши запросы. Заметьте, что Вы всегда можете использовать учётную запись RootDN (<code>cn=admin,dc=example,dc=com</code>), но это будет длиннее.</p>
+<pre class="sh">
+$  cd ~/ldap
+$  kdestroy
+$  kinit -p pablo/admin
+$  ldapsearch -ZZQLLLb cn=config dn |grep module
+dn: cn=module{0},cn=config
+</pre>
+<p>Как мы видим, информация о подключенных модулях содержится в записи <code>cn=module{0},cn=config</code>. Посмотрим, какие атрибуты в ней есть:</p>
+<pre class="sh">
+$  ldapsearch -ZZQLLLb cn=module{0},cn=config
+dn: cn=module{0},cn=config
+objectClass: olcModuleList
+cn: module{0}
+olcModulePath: /usr/lib/ldap
+olcModuleLoad: {0}back_mdb.la
+olcModuleLoad: {1}back_monitor.la
+</pre>
+<p>Два динамических модуля у нас уже подключены.  Лежат ли в одном каталоге с ними искомые модули наложений?</p>
+<pre class="sh">
+$  ls /usr/lib/ldap/ |egrep '(accesslog.la|syncprov.la)' 
+accesslog.la 
+syncprov.la
+</pre>
+<p>Вот этот короткий LDIF-файл <em>11.1.1-new-modules.ldif</em> поможет нам их подключить:</p>
+<pre class="list">
+<code>dn: cn=module{0},cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcModuleLoad</code>
+<code>olcModuleLoad: {2}accesslog.la</code>
+<code>-</code>
+<code>add: olcModuleLoad</code>
+<code>olcModuleLoad: {3}syncprov.la</code>
+</pre>
+<p>Загружаем LDIF:</p>
+<pre class="sh">$  ldapmodify -ZZQf 11.1.1-new-modules.ldif</pre>
+<p>Проверяем результат:</p>
+<pre class="sh">
+$  ldapsearch -ZZQLLLb cn=module{0},cn=config 
+dn: cn=module{0},cn=config 
+objectClass: olcModuleList 
+cn: module{0} 
+olcModulePath: /usr/lib/ldap 
+olcModuleLoad: {0}back_mdb.la 
+olcModuleLoad: {1}back_monitor.la 
+olcModuleLoad: {2}accesslog.la 
+olcModuleLoad: {3}syncprov.la
+</pre>
+
+<h3><a name="s1.2"></a>11.1.2 Настройка базы данных accesslog для хранения журнала доступа</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>После подключения динамического модуля наложения <strong>accesslog</strong> мы должны создать базу данных для хранения журнала доступа. Очевидно, мы можем сделать это с помощью ещё одного LDIF-файла (<em>11.1.2-accesslog.ldif</em>):</p>
+<pre class="list">
+<code>dn: olcDatabase=mdb,cn=config</code>
+<code>changetype: add</code>
+<code>objectClass: olcDatabaseConfig</code>
+<code>objectClass: olcMdbConfig</code>
+<code>olcDatabase: mdb</code>
+<code>olcDbDirectory: /var/lib/ldap/accesslog</code>
+<code>olcSuffix: cn=accesslog</code>
+<code>olcRootDN: cn=admin,dc=example,dc=com</code>
+<code>olcDbIndex: default eq</code>
+<code>olcDbIndex: entryCSN,objectClass,reqEnd,reqResult,reqStart</code>
+</pre>
+<p>Создадим каталог для этой базы данных:</p>
+<pre class="sh">
+#  mkdir -p /var/lib/ldap/accesslog
+#  chown -R openldap:openldap /var/lib/ldap
+</pre>
+<p>И загрузим конфигурацию LDIF в наш сервер каталогов:</p>
+<pre class="sh">
+$  ldapadd -ZZQf 11.1.2-accesslog.ldif
+adding new entry "olcDatabase=mdb,cn=config"
+</pre>
+<p>Посмотрим, какой порядковый номер у новой базы данных:</p>
+<pre class="sh">
+$  ldapsearch -ZZQLLLb cn=config dn |grep mdb
+dn: olcDatabase={1}mdb,cn=config
+dn: olcDatabase={3}mdb,cn=config
+</pre>
+<p>Первая строка вывода&thinsp;&mdash;&thinsp;наше основное DIT. Значит вторая&thinsp;&mdash;&thinsp;только что добавленная запись. Проверим только что загруженую конфигурацию:</p>
+<pre class="sh">$  ldapsearch -ZZQLLLb olcDatabase={3}mdb,cn=config</pre>
+
+<h3><a name="s1.3"></a>11.1.3 Определение наложения syncprov поверх базы данных accesslog</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Определим наложение <strong>syncprov</strong> для новой базы данных с помощью LDIF-файла <em>11.1.3-overlay.accesslog.ldif</em>:</p>
+<pre class="list">
+<code>dn: olcOverlay=syncprov,olcDatabase={3}mdb,cn=config</code>
+<code>changetype: add</code>
+<code>objectClass: olcOverlayConfig</code>
+<code>objectClass: olcSyncProvConfig</code>
+<code>olcOverlay: syncprov</code>
+<code>olcSpNoPresent: TRUE</code>
+<code>olcSpReloadHint: TRUE</code>
+</pre>
+<p>Так как мы будем использовать репликацию на основе журнала доступа, отключаем использование <a href="http://pro-ldap.ru/tr/zytrax/ch7/#ol-syncrepl">фазы наличия</a> с помощью атрибута <a href="http://pro-ldap.ru/tr/zytrax/ch6/syncprov.html"><code>olcSpNoPresent</code></a>. Атрибут <a href="http://pro-ldap.ru/tr/zytrax/ch6/syncprov.html"><code>olcSpReloadHint</code></a> указывает, что наложение должно соблюдать флаг <code>reloadHint</code> в Sync Control. Этот флаг используется потребителем, запрашивающим операцию репликации, для указания того, что он хочет принудительно выполнить загрузку полного DIT независимо от всех остальных параметров и значений, таких как Sync Cookie.</p>
+<p>Загрузим конфигурацию:</p>
+<pre class="sh">
+$  ldapadd -ZZQf 11.1.3-overlay.accesslog.ldif
+adding new entry "olcOverlay=syncprov,olcDatabase={3}mdb,cn=config"
+</pre>
+<p>В базе данных <code>olcDatabase={3}mdb,cn=config </code>должна появиться новая DN-запись:</p>
+<pre class="sh">
+$  ldapsearch -ZZQLLLb olcDatabase={3}mdb,cn=config
+dn: olcDatabase={3}mdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDatabase: {3}mdb
+olcDbDirectory: /var/lib/ldap/accesslog
+olcSuffix: cn=accesslog
+olcRootDN: cn=admin,dc=example,dc=com
+olcDbIndex: default eq
+olcDbIndex: entryCSN,objectClass,reqEnd,reqResult,reqStart
+ 
+dn: olcOverlay={0}syncprov,olcDatabase={3}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcSyncProvConfig
+olcOverlay: {0}syncprov
+olcSpNoPresent: TRUE
+olcSpReloadHint: TRUE
+</pre>
+
+<h3><a name="s1.4"></a>11.1.4 Определение наложений поставщика syncprov и accesslog поверх основной базы данных</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Новый LDIF-файл <em>11.1.4-overlay.primary.ldif</em> преследует три цели:</p>
+<ol>
+<li>Установка новых индексов в основной базе данных;</li>
+<li>Определение наложения syncprov поверх основной базы данных;</li>
+<li>Определение наложения accesslog поверх основной базы данных.</li>
+</ol>
+<p>Запишем в <em>11.1.4-overlay.primary.ldif</em>:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: entryCSN eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: entryUUID eq</code>
+<code></code>
+<code class="c"># Добавить наложение syncprov поверх базы данных dc=example,dc=com.</code>
+<code>dn: olcOverlay=syncprov,olcDatabase={1}mdb,cn=config</code>
+<code>objectClass: olcOverlayConfig</code>
+<code>objectClass: olcSyncProvConfig</code>
+<code>olcOverlay: syncprov</code>
+<code>olcSpCheckPoint: 500 15</code>
+<code></code>
+<code class="c"># Добавить наложение accesslog поверх базы данных dc=example,dc=com.</code>
+<code class="c"># Ежедневно сканировать журнал доступа к базе данных и очищать записи старше 7 дней.</code>
+<code>dn: olcOverlay=accesslog,olcDatabase={1}mdb,cn=config</code>
+<code>objectClass: olcOverlayConfig</code>
+<code>objectClass: olcAccessLogConfig</code>
+<code>olcOverlay: accesslog</code>
+<code>olcAccessLogDB: cn=accesslog</code>
+<code>olcAccessLogOps: writes</code>
+<code>olcAccessLogPurge: 7+00:00 1+00:00</code>
+<code>olcAccessLogSuccess: TRUE</code>
+</pre>
+<p>Загрузим конфигурацию:</p>
+<pre class="sh">
+$  ldapadd -ZZQf 11.1.4-overlay.primary.ldif
+modifying entry "olcDatabase={1}mdb,cn=config"
+adding new entry "olcOverlay=syncprov,olcDatabase={1}mdb,cn=config"
+adding new entry "olcOverlay=accesslog,olcDatabase={1}mdb,cn=config"
+</pre>
+<p>Убедимся, что новые наложения на месте:</p>
+<pre class="sh">
+$  ldapsearch -ZZQLLLb olcDatabase={1}mdb,cn=config dn
+dn: olcDatabase={1}mdb,cn=config
+dn: olcOverlay={0}syncprov,olcDatabase={1}mdb,cn=config
+dn: olcOverlay={1}accesslog,olcDatabase={1}mdb,cn=config
+</pre>
+
+<h3><a name="s1.5"></a>11.1.5 Новый пользователь для репликации</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Для функций репликации нам нужна новая учётная запись пользователя. Она будет использоваться для аутентификации и выгрузки данных сервером-репликой. Ни больше, ни меньше. Очередной LDIF-файл <em>11.1.5-replication.ldif</em> поможет нам добавить эту запись:</p>
+<pre class="list">
+<code>dn: cn=replication,dc=example,dc=com</code>
+<code>objectClass: simpleSecurityObject</code>
+<code>objectClass: organizationalRole</code>
+<code>cn: replication</code>
+<code>description: OpenLDAP Replication User</code>
+<code>userPassword: {SSHA}6yudY3jO+yyTyvov9LhIl1j9S9RZt7Dx</code>
+</pre>
+<p>Напоминаю, следующая команда генерирует посоленый хэш вводимого пароля. Замените в вышеприведённом файле значение атрибута <code>userPassword</code> на результат её работы:</p>
+<pre class="sh">$  slappasswd -h '{SSHA}'</pre>
+<p>Загрузим конфигурацию:</p>
+<pre class="sh">
+$  ldapadd -ZZQf 11.1.5-replication.ldif
+adding new entry "cn=replication,dc=example,dc=com"
+</pre>
+<p>Обратите внимание, в нашем примере пользователь для репликации называется просто <strong>replication</strong>. Если Вы планируете иметь несколько серверов для репликации, то в идеальном случае нужно создать отдельного пользователя с уникальным именем для каждого из них. Благодаря этому Вы сможете отслеживать, какой сервер и когда производил репликацию. Вы так же можете задать, какая часть DIT будет реплицироваться каждой машиной, но это уже другая история.</p>
+
+<h3><a name="s1.6"></a>11.1.6 Ограничения и ACL пользователя для репликации</h3>
+<p class="P30">Где работаем: <strong>ldap-srv</strong></p>
+<p>Осталось только задать новому пользователю <a href="http://pro-ldap.ru/tr/admin24/limits.html">ограничения</a> и прописать для него ACL. Проделаем это в два шага, начиная с ограничений. Создадим LDIF-файл <em>11.1.6-limits.ldif</em> и запишем в него:</p>
+<pre class="list">
+<code class="c"># Добавить ограничения для базы данных cn=accesslog</code>
+<code>dn: olcDatabase={3}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcLimits</code>
+<code>olcLimits: dn.exact="cn=replication,dc=example,dc=com" time.soft=unlimited time.hard=unlimited size.soft=unlimited size.hard=unlimited</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code>olcAccess: to *</code>
+<code>  by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth read</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" read</code>
+<code>  by dn.exact="cn=admin,dc=example,dc=com" read</code>
+<code>  by dn.exact="cn=replication,dc=example,dc=com" read</code>
+<code></code>
+<code class="c"># Добавить ограничения для базы данных dc=example,dc=com</code>
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcLimits</code>
+<code>olcLimits: dn.exact="cn=replication,dc=example,dc=com" time.soft=unlimited time.hard=unlimited size.soft=unlimited size.hard=unlimited</code>
+</pre>
+<p>Загрузим конфигурацию:</p>
+<pre class="sh">
+$  ldapadd -ZZQf 11.1.6-limits.ldif
+modifying entry "olcDatabase={3}mdb,cn=config" 
+modifying entry "olcDatabase={1}mdb,cn=config"
+</pre>
+<p>Следующий шаг&thinsp;&mdash;&thinsp;предоставить новому пользователю доступ на чтение в основной базе данных. Очень хорошая идея&thinsp;&mdash;&thinsp;дважды проверить текущие ACL перед подобной операцией:</p>
+<pre class="sh">$  ldapsearch -ZZQLLLb cn=config olcAccess</pre>
+<p>Теперь можем создать ещё один LDIF-файл, который обновит наши ACL. Здесь идея в том, чтобы иметь одинаковый набор ACL как у поставщика, так и у потребителя. За исключением того, что у потребителя нам не нужны ACL для пользователя <strong>replication</strong> (который будет описан далее в атрибуте <code>olcSyncRepl</code>). Сейчас же мы должны просто добавить его в ACL с номером 0. Запишем в LDIF-файл <em>11.1.6-provider.acl.ldif</em>:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config </code>
+<code>changetype: modify </code>
+<code>delete: olcAccess </code>
+<code>olcAccess: {0} </code>
+<code>- </code>
+<code>add: olcAccess </code>
+<code>olcAccess: {0}to * </code>
+<code>  by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage </code>
+<code>  by dn.exact="cn=replication,dc=example,dc=com" read </code>
+<code>  by * break</code>
+</pre>
+<p>Загрузим изменение ACL:</p>
+<pre class="sh">
+$  ldapadd -ZZQf 11.1.6-provider.acl.ldif
+modifying entry "olcDatabase={1}mdb,cn=config"
+</pre>
+<p>Так мы можем проверить результат:</p>
+<pre class="sh">$  ldapsearch -ZZQLLLb olcDatabase={1}mdb,cn=config olcAccess</pre>
+
+<p>Нам надо убедиться, что пользователь <code>cn=replication,dc=example,dc=com</code> имеет доступ ко всему DIT:</p>
+<pre class="sh">$  ldapsearch -xZZLLLWD cn=replication,dc=example,dc=com -H ldap://ldap-srv.example.com</pre>
+
+<p>Наличие доступа ко всему DIT&thinsp;&mdash;&thinsp;обязательно. Не идите дальше, пока этого не добъётесь. Когда всё получилось, мы можем перейти к настройке сервера-реплики (потребителя).</p>
+
+<h2><a name="s2"></a>11.2 Настройка потребителя</h2>
+<h3><a name="s2.1"></a>11.2.1 Создание сервера-реплики</h3>
+<p>Развернём новый сервер по аналогии с <a href="dns.html">разделом 1</a>.</p>
+<p class="place">Где работаем: <strong>dns-srv</strong></p>
+<p>Для начала обновим информацию на DNS сервере (файл <em>/etc/hosts</em>):</p>
+<pre class="list">
+<code>127.0.0.1        localhost</code>
+<code>192.168.122.140  dns-srv.example.com</code>
+<code></code>
+<code>192.168.122.150  ldap-srv.example.com</code>
+<code>192.168.122.151  ldap-client.example.com</code>
+<code>192.168.122.154  nfs-srv.example.com</code>
+<code>192.168.122.160 ldap-srv-repl.example.com</code>
+</pre>
+<p>Теперь установим Ubuntu 14.04 server на наш сервер-реплику и перейдём к его настройке.</p>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Настроим сеть в файле <em>/etc/network/interfaces</em>:</p>
+<pre class="list">
+<code>auto lo</code>
+<code>iface lo inet loopback</code>
+<code></code>
+<code>auto eth0</code>
+<code>iface eth0 inet static</code>
+<code>        address 192.168.122.160</code>
+<code>        netmask 255.255.255.0</code>
+<code>        gateway 192.168.122.1</code>
+<code>        dns-nameservers 192.168.122.140</code>
+</pre>
+<p>Настроим имя сервера-реплики. В Ubuntu 14.04 останов или перезапуск сервиса <strong>networking</strong> не поддерживается, поэтому придётся сделать так:</p>
+<pre class="sh">
+#  echo 'ldap-srv-repl.example.com' &gt; /etc/hostname
+#  reboot
+</pre>
+<p>Проверим разрешение имени будущего сервера-реплики LDAP:</p>
+<pre class="sh">
+$  dig ldap-srv-repl.example.com +short
+192.168.122.160
+</pre>
+<p>Проверим обратное разрешение имени:</p>
+<pre class="sh">
+$  dig -x `dig ldap-srv-repl.example.com +short` +short
+ldap-srv-repl.example.com.
+</pre>
+<p>Убедитесь, что время на <strong>ldap-srv</strong> и <strong>ldap-srv-repl</strong> совпадает. Часы всех наших серверов должны быть синхронизированы с использованием <a href="http://www.ntp.org/">NTP</a>, атомных часов или любого другого источника.</p>
+
+<h3><a name="s2.2"></a>11.2.2 Развёртывание OpenLDAP на сервере-реплике</h3>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Зададим пароль для суперпользователя и установим необходимые пакеты:</p>
+<pre class="sh">
+#  passwd
+#  apt-get install -y slapd ldap-utils krb5-kdc-ldap krb5-pkinit wamerican libsasl2-modules-gssapi-mit
+</pre>
+<p>Теперь мы должны настроить сервер OpenLDAP с пустой базой данных. Подробно этот процесс описан в <a href="init.html">разделе 2</a>. Но некоторые детали будут различаться, поэтому нельзя дословно повторять его здесь. Тезисно пробежим по основным моментам.</p>
+<p>Создадим временный каталог для работы со службой каталогов:</p>
+<pre class="sh">
+$  mkdir ~/ldap
+$  cd ~/ldap
+</pre>
+<p>Подготовим каталоги для конфигурации и базы данных демона <strong>slapd</strong>:</p>
+<pre class="sh">
+#  service slapd stop
+#  rm -rf /etc/ldap/slapd.d
+#  rm -rf /var/lib/ldap
+#  mkdir /etc/ldap/slapd.d
+#  mkdir /var/lib/ldap
+#  chown openldap:openldap /var/lib/ldap
+#  chmod 0700 /var/lib/ldap
+</pre>
+<p>Утянем с сервера <strong>ldap-srv</strong> схемы наборов данных в формате LDIF (мы их готовили самостоятельно):</p>
+<pre class="sh">#  scp user@ldap-srv.example.com:/etc/ldap/schema/{autofs,sudo,kerberos}.ldif /etc/ldap/schema</pre>
+<p>Подготовим посоленый хэш пароля для администратора OpenLDAP на текущем сервере:</p>
+<pre class="sh">
+$  slappasswd -h '{SSHA}' 
+New password: 
+Re-enter new password: 
+{SSHA}AUEv75PLvTDOyrO5yYvQXmyRurYwTdmn
+</pre>
+<p>Теперь у нас есть всё, чтобы написать конфигурацию сервера в LDIF-формате. Для понимания синтаксиса Syncrepl <a href="http://www.openldap.org/doc/admin24/slapdconfig.html#syncrepl">ознакомьтесь</a> с <a href="http://pro-ldap.ru/tr/admin24/slapdconfig.html#General%20Database%20Directives">документацией</a>. Запишем в файл <em>11.2.2-consumer.slapd.ldif</em>:</p>
+<pre class="list">
+<code>dn: cn=config</code>
+<code>objectClass: olcGlobal</code>
+<code>cn: config</code>
+<code>olcPidFile: /var/run/slapd/slapd.pid</code>
+<code>olcArgsFile: /var/run/slapd/slapd.args</code>
+<code></code>
+<code>dn: olcDatabase={0}config,cn=config</code>
+<code>objectClass: olcDatabaseConfig</code>
+<code>olcDatabase: {0}config</code>
+<code>olcRootDN: cn=config</code>
+<code>olcAccess: to *</code>
+<code>  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage</code>
+<code>  by * none</code>
+<code></code>
+<code>dn: cn=schema,cn=config</code>
+<code>objectClass: olcSchemaConfig</code>
+<code>cn: schema</code>
+<code></code>
+<code>dn: cn=module,cn=config</code>
+<code>objectClass: olcModuleList</code>
+<code>cn: module</code>
+<code>olcModulePath: /usr/lib/ldap</code>
+<code>olcModuleLoad: back_mdb.la</code>
+<code>olcModuleLoad: back_monitor.la</code>
+<code></code>
+<code>include: file:///etc/ldap/schema/core.ldif</code>
+<code>include: file:///etc/ldap/schema/cosine.ldif</code>
+<code>include: file:///etc/ldap/schema/inetorgperson.ldif</code>
+<code>include: file:///etc/ldap/schema/collective.ldif</code>
+<code>include: file:///etc/ldap/schema/corba.ldif</code>
+<code>include: file:///etc/ldap/schema/duaconf.ldif</code>
+<code>include: file:///etc/ldap/schema/openldap.ldif</code>
+<code>include: file:///etc/ldap/schema/dyngroup.ldif</code>
+<code>include: file:///etc/ldap/schema/java.ldif</code>
+<code>include: file:///etc/ldap/schema/misc.ldif</code>
+<code>include: file:///etc/ldap/schema/nis.ldif</code>
+<code>include: file:///etc/ldap/schema/ppolicy.ldif</code>
+<code>include: file:///etc/ldap/schema/kerberos.ldif</code>
+<code>include: file:///etc/ldap/schema/sudo.ldif</code>
+<code>include: file:///etc/ldap/schema/autofs.ldif</code>
+<code></code>
+<code class="c"># Основная база данных</code>
+<code>dn: olcDatabase=mdb,cn=config</code>
+<code>objectClass: olcMdbConfig</code>
+<code>olcDatabase: mdb</code>
+<code>olcSuffix: dc=example,dc=com</code>
+<code>olcDbDirectory: /var/lib/ldap</code>
+<code>olcDbMaxsize: 1073741824</code>
+<code>olcRootDN: cn=admin,dc=example,dc=com</code>
+<code>olcRootPW: {SSHA}AUEv75PLvTDOyrO5yYvQXmyRurYwTdmn</code>
+<code class="c"># Специальные индексы для Syncrepl</code>
+<code>olcDbIndex: entryUUID eq</code>
+<code class="c"># Директивы Syncrepl</code>
+<code>olcSyncRepl: rid=0</code>
+<code>  provider=ldap://ldap-srv.example.com:389</code>
+<code>  bindmethod=simple</code>
+<code>  starttls=yes</code>
+<code>  binddn="cn=replication,dc=example,dc=com"</code>
+<code>  credentials="пароль.пользователя.replication"</code>
+<code>  searchbase="dc=example,dc=com"</code>
+<code>  logbase="cn=accesslog"</code>
+<code>  logfilter="(&amp;(objectClass=auditWriteObject)(reqResult=0))"</code>
+<code>  schemachecking=on</code>
+<code>  type=refreshAndPersist</code>
+<code>  retry="60 +"</code>
+<code>  syncdata=accesslog</code>
+<code class="c"># Ссылка на мастер-сервер (поставщик)</code>
+<code>olcUpdateRef: ldap://ldap-srv.example.com</code>
+<code class="c"># Правила доступа практически идентичны</code>
+<code class="c"># (нет записи для пользователя replication)</code>
+<code>olcAccess: {0}to *</code>
+<code>  by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage</code>
+<code>  by * break</code>
+<code>olcAccess: {1}to attrs=userPassword,userPKCS12</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by self write</code>
+<code>  by anonymous auth</code>
+<code>olcAccess: {2}to attrs=shadowLastChange</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by self write</code>
+<code>olcAccess: {3}to dn.subtree="cn=kerberos,ou=services,dc=example,dc=com"</code>
+<code>  by dn.exact="cn=krbadmin,ou=users,dc=example,dc=com" write</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" read</code>
+<code>olcAccess: {4}to dn.subtree="ou=autofs,ou=services,dc=example,dc=com"</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by dn.regex="uid=autofsclient/.*,cn=example.com,cn=gssapi,cn=auth" read</code>
+<code>olcAccess: {5}to *</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by dn.exact="cn=krbadmin,ou=users,dc=example,dc=com" write</code>
+<code>  by self read</code>
+<code>  by dn.base="cn=nssproxy,ou=users,dc=example,dc=com" read</code>
+<code></code>
+<code>dn: olcDatabase=monitor,cn=config</code>
+<code>objectClass: olcDatabaseConfig</code>
+<code>olcDatabase: monitor</code>
+</pre>
+<p>Атрибут <code>olcUpdateRef</code> играет очень важную роль. Вы можете настроить клиентские машины для использования сервера-реплики в качестве поставщика информации из каталога. Но эта информация будет доступна только для чтения. Если клиентская машина (или пользователь) выполнит запрос, требующий изменения записи, его запрос будет перенаправлен на основной сервер (<strong>ldap-srv.example.com</strong>).</p>
+<p>Сгенерируем первичную конфигурацию:</p>
+<pre class="sh">
+#  slapadd -n 0 -F /etc/ldap/slapd.d -l 11.2.2-consumer.slapd.ldif
+_#################### 100.00% eta   none elapsed            none fast!         
+Closing DB...
+</pre>
+<p>Проверим корректность конфигурации:</p>
+<pre class="sh">#  slaptest -uF /etc/ldap/slapd.d
+config file testing succeeded
+</pre>
+<p>Поправим права доступа к файлам конфигурации:</p>
+<pre class="sh">#  chown -R openldap:openldap /etc/ldap/slapd.d</pre>
+<p>Подготовим систему журналирования. В конфигурации <em>/etc/rsyslog.conf</em> добавим несколько строк:</p>
+<pre class="list">
+$ModLoad imuxsock <span class="c"># provides support for local system logging</span>
+$ModLoad imklog   <span class="c"># provides kernel logging support</span>
+ 
+$KLogPermitNonKernelFacility on
+ 
+$ActionFileDefaultTemplate RSYSLOG_TraditionalFileFormat
+ 
+$RepeatedMsgReduction on
+ 
+$FileOwner syslog
+$FileGroup adm
+$FileCreateMode 0640
+$DirCreateMode 0755
+$Umask 0022
+$PrivDropToUser syslog
+$PrivDropToGroup syslog
+ 
+$WorkDirectory /var/spool/rsyslog
+ 
+$IncludeConfig /etc/rsyslog.d/*.conf
+ 
+<span class="c"># Send slapd logs to /var/log/slapd.log</span>
+if $programname == 'slapd' then /var/log/slapd.log
+&amp; ~
+ 
+if $programname == 'krb5kdc' then /var/log/krb5kdc.log
+&amp; ~
+</pre>
+<p>Создадим файлы для журналов наших демонов и зададим для них права доступа. Затем перезапустим <strong>rsyslog</strong>, чтобы изменения вступили в силу:</p>
+<pre class="sh">
+#  touch /var/log/{slapd,krb5kdc}.log
+#  chmod 0640 /var/log/{slapd,krb5kdc}.log
+#  chown syslog:adm /var/log/{slapd,krb5kdc}.log
+#  service rsyslog restart
+</pre>
+<p>Настроим <strong>logrotate</strong> для управления этими журналами.</p>
+<p>Создадим файл конфигурации <em>/etc/logrotate.d/slapd</em> и запишем в него:</p>
+<pre class="list">
+<code>/var/log/slapd.log {</code>
+<code> daily</code>
+<code> missingok</code>
+<code> rotate 7</code>
+<code> compress</code>
+<code> delaycompress</code>
+<code> notifempty</code>
+<code>}</code>
+</pre>
+<p>Файл <em>/etc/logrotate.d/krb5kdc</em> для демона <strong>krb5-kdc</strong>:</p>
+<pre class="list">
+<code>/var/log/krb5kdc.log {</code>
+<code> daily</code>
+<code> missingok</code>
+<code> rotate 7</code>
+<code> compress</code>
+<code> delaycompress</code>
+<code> notifempty</code>
+<code>}</code>
+</pre>
+<p>Проверим настройку <strong>logrotate</strong>:</p>
+<pre class="sh"># logrotate -df /etc/logrotate.conf</pre>
+<p>Отредактируем общесистемную конфигурацию демона <strong>slapd</strong> в файле <em>/etc/default/slapd</em>:</p>
+<pre class="list">
+<code>SLAPD_CONF=</code>
+<code>SLAPD_USER="openldap" </code>
+<code>SLAPD_GROUP="openldap"</code>
+<code>SLAPD_PIDFILE=</code>
+<code>SLAPD_SERVICES="ldap:/// ldapi:///"</code>
+<code>SLAPD_SENTINEL_FILE=/etc/ldap/noslapd</code>
+<code>SLAPD_OPTIONS="-4"</code>
+</pre>
+
+<h3><a name="s2.3"></a>11.2.3 Первичная загрузка DIT на сервер-реплику</h3>
+<p>Первичная загрузка позволяет загрузить DIT на сервер-реплику через файл, не прибегая к репликации и без формирования большого потока траффика в сети. Это не обязательно, но если DIT достаточно большое, мы можем сэкономить много времени.</p>
+<p>Но у Вас ничего не получится, если версия используемого сервера OpenLDAP&thinsp;&mdash;&thinsp;2.4.31 и более ранняя. Связано такое поведение с ошибкой <a href="http://www.openldap.org/its/index.cgi/Software%20Bugs?id=7255;selectid=7255">ITS#7255</a>, исправленной <a href="http://www.openldap.org/software/release/changes.html">в версии 2.4.32</a>.</p>
+<p>Проверить версию можно так:</p>
+<pre class="sh">
+$  dpkg --status slapd|grep Version
+Version: 2.4.31-1+nmu2ubuntu8
+</pre>
+<p>Самый благоразумный вариант при развёртывании OpenLDAP в такой ситуации&thinsp;&mdash;&thinsp;не предпринимать ничего и просто пропустить этот раздел. Пусть пакет <strong>slapd</strong> спокойно обновится и данный функционал у Вас заработает. А первичную загрузку DIT можно произвести просто запустив механизм репликации по сети. Но в любом случае с информацией ознакомиться стоит. Она описывает более подробно процесс, тезисно зафиксированный в документации.</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Последний этап пред тем, как мы запустим репликацию&thinsp;&mdash;&thinsp;выгрузить всё DIT от поставщика потребителю.</p>
+<p>Выгрузим всё DIT в LDIF-файл. В целях безопасности сначала зададим <strong>umask</strong>:</p>
+<pre class="sh">
+#  umask 066
+#  slapcat | tee -a /tmp/provider.slapcat.ldif
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Создадим каталог-приёмник для этого файла:</p>
+<pre class="sh">
+$  mkdir ~/dit
+$  chmod u=rwx,g=,o= ~/dit
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Отправим файл на сервер-реплику (если уж DIT совсем большое, вместо <strong>scp</strong> можно использовать съёмный носитель). Затем&thinsp;&mdash;&thinsp;удалим исходный файл:</p>
+<pre class="sh">
+#  scp /tmp/provider.slapcat.ldif user@ldap-srv-repl.example.com:~/dit
+#  shred /tmp/provider.slapcat.ldif
+</pre>
+<p class="place"><span class="T16">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Уничтожим каталог с базой данных и воссоздадим его пустым:</p>
+<pre class="sh">
+#  service slapd stop
+#  rm -rf /var/lib/ldap
+#  mkdir /var/lib/ldap
+#  chmod u=rwx,g=,o= /var/lib/ldap
+#  chown openldap:openldap /var/lib/ldap
+</pre>
+<p>Загрузим DIT из скопированного нами файла в базу данных поставщика. Обратите внимание на модификатор <code>-w</code> у команды <strong>slapadd</strong>. Он позволит записать в базу данных информацию о контексте Syncrepl. Как только все записи будут загружены, значение <code>contextCSN</code> обновится в соответствии с самым большим <code>entryCSN</code>. В нашем случае это очень кстати :)</p>
+<pre class="sh">#  slapadd -l provider.slapcat.ldif -w</pre>
+<p>(именно здесь возникает проблема при использовании <strong>slapd</strong> версии 2.4.31, процесс загрузки просто зависает)</p>
+<p>И снова уничтожим временный файл, теперь уже на клиентской машине. В конце концов, в этом файле содежится всё DIT открытым текстом:</p>
+<pre class="sh">$  shred ~/dit/provider.slapcat.ldif</pre>
+<p>Убедимся, что всё DIT находится на сервере-реплике:</p>
+<pre class="sh">$  ldapsearch -xWD cn=admin,dc=example,dc=com -b dc=example,dc=com -H ldap://ldap-srv-repl.example.com</pre>
+
+<h3><a name="s2.4"></a>11.2.4 Запуск слубы каталогов на сервере-реплике</h3>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Запускаем демон <strong>slapd</strong> и добавляем его в автозагрузку:</p>
+<pre class="sh">
+#  service slapd start
+#  update-rc.d slapd defaults
+</pre>
+<p>Слегка изменим права доступа с помощью LDIF-файла <em>11.2.4-consumer.acl.ldif</em>:</p>
+<pre class="list">
+<code>dn: olcDatabase={0}config,cn=config</code>
+<code>changetype: modify</code>
+<code>replace: olcRootDN</code>
+<code>olcRootDN: cn=admin,dc=example,dc=com</code>
+<code>-</code>
+<code>replace: olcAccess</code>
+<code>olcAccess: to *</code>
+<code>  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by * none</code>
+</pre>
+<p>Загрузим изменение ACL:</p>
+<pre class="sh">
+#  ldapmodify -QY EXTERNAL -H ldapi:/// -f 11.2.4-consumer.acl.ldif
+modifying entry "olcDatabase={0}config,cn=config"
+</pre>
+<p>Настроим общесистемную конфигурацию клиентских запросов в файле <em>/etc/ldap/ldap.conf</em>. Это немного сократит количество печатаемого нами текста. Пока не обращайте внимание на параметры TLS, мы разберёмся с ними в следующем разделе. Не забудьте, что в этом разделе мы работаем с <strong>ldap-srv-repl.example.com</strong> и запросы мы отправляем именно ему. Это важно, потому что мы хотим опрашивать и модифицировать только потребителя, не поставщика (<strong>ldap-srv.example.com</strong>). Итак, запишем в <em>/etc/ldap/ldap.conf</em>:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv-repl.example.com</code>
+<code class="c"># TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code class="c"># TLS_CRLFILE /etc/ssl/rootca.crl</code>
+<code class="c"># TLS_REQCERT demand</code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+</pre>
+<p>Проверим, может ли наш администратор выполнить запрос:</p>
+<pre class="sh">
+$  ldapwhoami -WD cn=admin,dc=example,dc=com
+Enter LDAP Password:
+dn:cn=admin,dc=example,dc=com
+</pre>
+<p>Если в соответствии с <a href="netgroup.html#s4.2">разделом 8.4.2</a> мы меняли схему данных nis, то нам придётся это повторить и здесь. Три простых шага и всё готово:</p>
+<p>Посмотрим, какой порядковый номер у схемы данных <strong>nis</strong> в нашем каталоге и у атрибута <code>nisNetgroupTriple</code> в схеме данных <strong>nis</strong>:</p>
+<pre class="sh">
+$  ldapsearch -LLLxWD cn=admin,dc=example,dc=com -b cn=schema,cn=config dn |grep nis
+Enter LDAP Password:
+dn: cn={<strong>10</strong>}nis,cn=schema,cn=config
+$  ldapsearch -LLLxWD cn=admin,dc=example,dc=com -b cn=schema,cn=config | grep nisNetgroupTriple
+Enter LDAP Password: 
+olcAttributeTypes: {<strong>12</strong>}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr
+  a netgroup' SUP top STRUCTURAL MUST cn MAY ( nisNetgroupTriple $ memberNisNe
+</pre>
+<p>Номера 10 и 12 соответственно. Сформируем новый LDIF  под названием <em>11.2.4-nis-schema-change.ldif</em> для изменения схемы. Если два последних номера у Вас отличаются&thinsp;&mdash;&thinsp;подставьте свои значения:</p>
+<pre class="sh">
+<code>dn: cn={<strong>10</strong>}nis,cn=schema,cn=config</code>
+<code>changetype: modify</code>
+<code>delete: olcAttributeTypes</code>
+<code>olcAttributeTypes: {<strong>12</strong>}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr</code>
+<code> oup triple' SYNTAX 1.3.6.1.1.1.0.0 )</code>
+<code>-</code>
+<code>add: olcAttributeTypes</code>
+<code>olcAttributeTypes: {<strong>12</strong>}( 1.3.6.1.1.1.1.14 NAME 'nisNetgroupTriple' DESC 'Netgr</code>
+<code> oup triple' EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )</code>
+</pre>
+<p>Загрузим его в наш сервер каталогов:</p>
+<pre class="sh">
+$  ldapadd -xZWD cn=admin,dc=example,dc=com  -f 11.2.4-consumer.nis-change.ldif
+Enter LDAP Password:
+modifying entry "cn={10}nis,cn=schema,cn=config"
+</pre>
+<p>Дважды проверьте по журналам, что Вы подключаетесь именно к серверу-реплике!</p>
+
+<h3><a name="s2.5"></a>11.2.5 Настройка TLS для сервера-реплики</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Создадим закрытый ключ для сервера-реплики:</p>
+<pre class="sh">
+#  cd /root/CA
+#  openssl genrsa -out private/ldap-srv-repl.example.com.key 4096
+#  chmod 400 private/ldap-srv-repl.example.com.key
+</pre>
+<p>Сгенерируем запрос на подпись сертификата:</p>
+<pre class="sh">
+#  openssl req -sha256 -new \
+        -key private/ldap-srv-repl.example.com.key</span> -out certs/<span class="T25">ldap-srv-repl.example.com.csr \
+        -subj /C=RU/ST=Moscow/L=Moscow/O=ExampleInc/OU=ITdept/CN=ldap-srv-repl.example.com/emailAddress=support@example.com
+</pre>
+<p>Подпишем его с помощью своего CA:</p>
+<pre class="sh">
+#  openssl ca -extensions usr_cert -notext -md sha256 \
+ -keyfile private/rootca.key -cert certs/rootca.crt \
+ -in certs/ldap-srv-repl.example.com.csr -out certs/ldap-srv-repl.example.com.crt
+#  chmod 444 certs/ldap-srv-repl.example.com.crt
+</pre>
+<p>Теперь нужно безопасным образом переместить на сервер <strong>ldap-srv-repl</strong> четыре файла:</p>
+<ul>
+<li>Корневой сертификат, <strong>rootca.crt</strong>;</li>
+<li>Список отозванных сертификатов, <strong>rootca.crl</strong>;</li>
+<li>Закрытый ключ нового сервера, <strong>ldap-srv-repl.example.com.key</strong>;</li>
+<li>Сертификат нового сервера, <strong>ldap-srv-repl.example.com.crt</strong>.</li>
+</ul>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Подготовим каталог для временного хранения этой информации на сервере-реплике в домашнем каталоге пользователя, которого Вы создали при установке операционной системы (допустим, <strong>user</strong>):</p>
+<pre class="sh">
+$  whoami
+user
+$  mkdir ~/certs
+$  chmod u=rwx,g=,o= ~/certs
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Скопируем файлы в этот каталог с сервера, где находится наш CA, используя учётную запись <strong>user</strong>:</p>
+<pre class="sh">
+#  pwd
+/root/CA
+#  scp private/ldap-srv-repl.example.com.key certs/ldap-srv-repl.example.com.crt certs/rootca.crt crl/rootca.crl user@ldap-srv-repl.example.com:~/certs
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Создадим каталог для ключевой информации нашего сервера и поместим туда получившиеся у нас файлы:</p>
+<pre class="sh">
+#  mkdir /etc/ldap/ssl
+#  chown openldap:openldap /etc/ldap/ssl
+#  chmod 0500 /etc/ldap/ssl
+#  cd /home/user/certs
+#  mv ldap-srv-repl.example.com.crt ldap-srv-repl.example.com.key /etc/ldap/ssl
+</pre>
+<p>Установим права доступа для ключевой информации:</p>
+<pre class="sh">
+#  chown openldap:openldap /etc/ldap/ssl/{ldap-srv-repl.example.com.crt,ldap-srv-repl.example.com.key}
+#  chmod 0400 /etc/ldap/ssl/{ldap-srv-repl.example.com.crt,ldap-srv-repl.example.com.key}
+</pre>
+<p>Поместим корневой сертификат и список отозванных сертификатов в каталог с сертификатами операционной системы и зададим для них права доступа:</p>
+<pre class="sh">
+#  mv rootca.crt /etc/ssl/certs/
+#  chmod 0644 /etc/ssl/certs/rootca.crt
+#  mv rootca.crl /etc/ssl/
+#  chmod 0644 /etc/ssl/rootca.crl
+</pre>
+<p>Опишем конфигурацию TLS для <strong>ldap-srv-repl</strong> в LDIF-файле <em>11.2.5-tls.consumer.ldif</em>:</p>
+<pre class="list">
+<code>dn: cn=config</code>
+<code>add: olcTLSCertificateFile</code>
+<code>olcTLSCertificateFile: /etc/ldap/ssl/ldap-srv-repl.example.com.crt</code>
+<code>-</code>
+<code>add: olcTLSCertificateKeyFile</code>
+<code>olcTLSCertificateKeyFile: /etc/ldap/ssl/ldap-srv-repl.example.com.key</code>
+<code>-</code>
+<code>add: olcTLSCACertificateFile</code>
+<code>olcTLSCACertificateFile: /etc/ssl/certs/rootca.crt</code>
+<code>-</code>
+<code>add: olcTLSVerifyClient</code>
+<code>olcTLSVerifyClient: never</code>
+</pre>
+<p>Загрузим конфигурацию:</p>
+<pre class="sh">$  ldapmodify -xWD cn=admin,dc=example,dc=com -f 11.2.5-tls.consumer.ldif</pre>
+<p>И проверим результат:</p>
+<pre class="sh">
+#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b cn=config -s base | grep olcTLS
+olcTLSCertificateFile: /etc/ldap/ssl/ldap-srv-repl.example.com.crt
+olcTLSCertificateKeyFile: /etc/ldap/ssl/ldap-srv-repl.example.com.key
+olcTLSCACertificateFile: /etc/ssl/certs/rootca.crt
+olcTLSVerifyClient: never
+</pre>
+<p>Раскомментируем строчки в <em>/etc/ldap/ldap.conf</em>:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv-repl.example.com</code>
+<code><strong>TLS_CACERT /etc/ssl/certs/rootca.crt</strong></code>
+<code><strong>TLS_CRLFILE /etc/ssl/rootca.crl</strong></code>
+<code><strong>TLS_REQCERT demand</strong></code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+</pre>
+<p>И попробуем выполнить запрос с использованием TLS (параметр <code>-Z</code>):</p>
+<pre class="sh">
+$  ldapwhoami -xZZWD cn=admin,dc=example,dc=com
+Enter LDAP Password: 
+dn:cn=admin,dc=example,dc=com
+</pre>
+<p>С помощью LDIF-файла <em>11.2.5-consumer.dbindexes.ldif</em> изменим настройки журналирования сервера каталогов и добавим индексы для основной базы данных:</p>
+<pre class="list">
+<code>dn: cn=config</code>
+<code>changetype: modify</code>
+<code>replace: olcLogLevel</code>
+<code>olcLogLevel: stats</code>
+<code></code>
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: entryCSN eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: uid eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: cn eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: ou eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: dc eq</code>
+</pre>
+<p>Теперь журнал сервера будет достаточно подробным. Это поможет нам в отладке. Загрузим конфигурацию:</p>
+<pre class="sh">$  ldapadd -xZZWD cn=admin,dc=example,dc=com -f 11.2.5-consumer.dbindexes.ldif</pre>
+<p>Проверим, что у нас получилось в итоге следующей командой:</p>
+<pre class="sh">#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b cn=config "(|(cn=config)(olcDatabase={1}mdb))"</pre>
+
+<h3><a name="s2.6"></a>11.2.6 Настройка SASL GSSAPI для сервера-реплики</h3>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Включим аутентификацию SASL GSSAPI на новом сервере каталогов с помощью LDIF-файла <em>11.2.6-consumer.gssapi.ldif</em>:</p>
+<pre class="list">
+<code>dn: cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcSaslHost</code>
+<code>olcSaslHost: ldap-srv-repl.example.com</code>
+<code>-</code>
+<code>add: olcSaslRealm</code>
+<code>olcSaslRealm: EXAMPLE.COM</code>
+<code>-</code>
+<code>add: olcSaslSecProps</code>
+<code>olcSaslSecProps: noanonymous,noplain</code>
+</pre>
+<p>Загрузим конфигурацию:</p>
+<pre class="sh">$  ldapadd -xZZWD cn=admin,dc=example,dc=com -f 11.2.6-consumer.gssapi.ldif</pre>
+<p>Теперь нам нужно добавить параметр <code>KRB5_KTNAME</code> в файл <em>/etc/default/slapd</em>:</p>
+<pre class="list">
+<code>SLAPD_CONF=</code>
+<code>SLAPD_USER="openldap" </code>
+<code>SLAPD_GROUP="openldap"</code>
+<code>SLAPD_PIDFILE=</code>
+<code>SLAPD_SERVICES="ldap:/// ldapi:///"</code>
+<code>SLAPD_SENTINEL_FILE=/etc/ldap/noslapd</code>
+<code>SLAPD_OPTIONS="-4"</code>
+<code><strong>export KRB5_KTNAME=/etc/ldap/krb5.keytab</strong></code>
+</pre>
+<p>Скопириуем конфигурацию-описание области EXAMPLE.COM с основного сервера, чтобы не было проблем при подключении с помощью устилиты <strong>kadmin</strong>:</p>
+<pre class="sh">#  scp user@ldap-srv.example.com:/etc/krb5.conf /etc/</pre>
+<p>Создадим набор ключей Kerberos для сервера OpenLDAP, ключ принципала сервера <strong>ldap-srv-repl</strong> и ключ <strong>autofsclient</strong> для автоматического монтирования на этом сервере в диалоге команды <strong>kadmin</strong>. <strong>ВНИМАНИЕ:</strong> заметьте, как мы размещаем принципалы в наборах ключей. Принципалы <strong>host/</strong> и <strong>autofsclient/</strong> размещаются в <em>/etc/krb5.keytab</em>, а принципал <strong>ldap/</strong>&thinsp;&mdash;&thinsp; в <em>/etc/ldap/krb5.keytab</em>:</p>
+<pre class="sh">
+#  kadmin -p pablo/admin@EXAMPLE.COM
+kadmin:  <strong>addprinc -randkey ldap/ldap-srv-repl.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>ktadd -k /etc/ldap/krb5.keytab ldap/ldap-srv-repl.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>addprinc -randkey host/ldap-srv-repl.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>ktadd -k /etc/krb5.keytab host/ldap-srv-repl.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>addprinc -randkey autofsclient/ldap-srv-repl.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>ktadd -k /etc/krb5.keytab autofsclient/ldap-srv-repl.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>exit</strong>
+</pre>
+<p>Поправим права доступа на новый набор ключей:</p>
+<pre class="sh">
+#  chown root:openldap /etc/ldap/krb5.keytab
+#  chmod 640 /etc/ldap/krb5.keytab
+</pre>
+<p>Перезапустим демон службы каталогов:</p>
+<pre class="sh">#  service slapd restart</pre>
+<p>Проверим аутентификацию SASL GSSAPI:</p>
+<pre class="sh">
+$  kdestroy
+$  kinit -p pablo/admin@EXAMPLE.COM
+$  ldapwhoami
+SASL/GSSAPI authentication started 
+SASL username: pablo/admin@EXAMPLE.COM
+SASL SSF: 56
+SASL data security layer installed.
+dn:uid=pablo/admin,cn=example.com,cn=gssapi,cn=auth
+</pre>
+
+<h3><a name="s2.7"></a>11.2.7 Проверка репликации</h3>
+<p>Сервер-реплика <strong>ldap-srv-repl.example.com</strong> (потребитель OpenLDAP), настроен с использованием TLS и SASL GSSAPI. Сервер получает данные от поставщика <strong>ldap-srv.example.com</strong>. Проверим, работает ли процедура репликации. В качестве примера будем менять рабочую оболочку (<code>loginShell</code>) пользователя <strong>test.user</strong>.</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Посмотрим текущее значение атрибута <code>loginShell</code> пользователя <strong>test.user</strong>:</p>
+<pre class="sh">
+$  ldapsearch -QLLLZZb cn=test.user,ou=users,dc=example,dc=com loginShell
+dn: cn=test.user,ou=users,dc=example,dc=com
+loginShell: /bin/bash
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Проверим значение того же поля на сервере-реплике:</p>
+<pre class="sh">
+$  ldapsearch -QLLLZb cn=test.user,ou=users,dc=example,dc=com loginShell
+dn: cn=test.user,ou=users,dc=example,dc=com
+loginShell: /bin/bash
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Поменяем оболочку пользователя на <code>/bin/sh</code>:</p>
+<pre class="sh">
+$  ldapmodify &lt;&lt;-EOF
+dn: cn=test.user,ou=users,dc=example,dc=com
+changetype: modify
+replace: loginShell
+loginShell: /bin/sh
+EOF
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Проверим, применились ли изменения на сервере-реплике:</p>
+<pre class="sh">
+$  ldapsearch -QLLLZb cn=test.user,ou=users,dc=example,dc=com loginShell
+dn: cn=test.user,ou=users,dc=example,dc=com
+loginShell: /bin/sh
+</pre>
+<p>Репликация работает! Ура!</p>
+
+<h3><a name="s2.8"></a>11.2.8 Настройка подчиненного сервера Kerberos</h3>
+<p>Смысл репликации DIT&thinsp;&mdash;&thinsp;иметь запасную копию на случай выхода из строя основного сервера (поставщика). Но наше DIT помимо прочего поддерживает инфраструктуру Kerberos. Поэтому мы должны настроить сервер-реплику так, чтобы он выполнял роль подчинённого сервера Kerberos на случай выхода из строя основного.</p>
+<p>Для развёртывания подчинённого сервера Kerberos мы уже установили необходимые пакеты и произвели некоторые настройки (в предыдущих разделах). Сейчас нам нужно переместить на подчинённый сервер три файла: закрытый ключ Kerberos, конфигурацию области и файл-тайник.</p>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Создадим на сервере-реплике каталог для их временного хранения:</p>
+<pre class="sh">
+$  mkdir ~/kerberos
+$  chmod u=rwx,g=,o= ~/kerberos/
+$  cd ~/kerberos/
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Скопируем файлы во временный каталог:</p>
+<pre class="sh">#  scp /etc/krb5kdc/{.k5.EXAMPLE.COM,kdc.conf,kadm5.acl} /etc/krb5.d/stash.keyfile user@ldap-srv-repl.example.com:~/kerberos</pre>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Поместим эти файлы на свои места и поправим права доступа:</p>
+<pre class="sh">
+#  mkdir /etc/krb5.d/
+#  chmod u=rwx,g=,o= /etc/krb5.d/
+#  mv {.k5.EXAMPLE.COM,kdc.conf,kadm5.acl} /etc/krb5kdc/
+#  mv stash.keyfile /etc/krb5.d/
+#  chown -R root:root /etc/krb5kdc /etc/krb5.d
+</pre>
+<p>Добавим в базу данных некоторые индексы. Запишем в файл <em>11.2.8-kerberos.indexes.ldif</em>:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: objectClass eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: krbPrincipalName eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: sudoUser eq,sub</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: uidNumber,gidNumber,memberUid,uniqueMember eq</code>
+</pre>
+<p>Загрузим конфигурацию:</p>
+<pre class="sh">$  ldapadd -QZZf 11.2.6-kerberos.indexes.ldif</pre>
+<p>Проверим, на месте ли новые индексы:</p>
+<pre class="sh">
+$  ldapsearch -QZZLLLb olcDatabase={1}mdb,cn=config olcDbIndex
+dn: olcDatabase={1}mdb,cn=config
+olcDbIndex: entryUUID eq
+olcDbIndex: entryCSN eq
+olcDbIndex: uid eq
+olcDbIndex: cn eq
+olcDbIndex: ou eq
+olcDbIndex: dc eq
+olcDbIndex: objectClass eq 
+olcDbIndex: krbPrincipalName eq
+olcDbIndex: sudoUser eq,sub
+olcDbIndex: uidNumber,gidNumber,memberUid,uniqueMember eq
+</pre>
+<p>Убедитесь, что подчинённый KDC стартует автоматически и запустите его. Обратите внимание, что демон управления доменом Kerberos (<strong>kadmind</strong>) на подчинённом сервере мы не запускаем!</p>
+<pre class="sh">
+#  update-rc.d  krb5-kdc defaults
+#  service krb5-kdc start
+</pre>
+
+<h3><a name="s2.9"></a>11.2.9 Резервное копирование и восстановление сервера-реплики</h3>
+<p>Настройте резервное копирование и восстановление на сервере-реплике в соответствии с методикой, приведённой в <a href="backup.html">разделе 10</a>.</p>
+
+
+<h2><a name="s3"></a>11.3 Проверка статуса репликации</h2>
+<p>Порой файлы журналов не дают чёткого представления, закончен процесс репликации или нет. Чтобы в этом удостовериться, просто запросите у поставщика и потребителя значение contextCSN. Если ответы от обоих серверов совпадают, репликация закончена.</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<pre class="sh">
+$  kdestroy
+$  kinit -p pablo/admin
+$  ldapsearch  -ZZQLLL -s base contextCSN
+dn: dc=example,dc=com
+contextCSN: 20150112110636.224261Z#000000#000#000000
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<pre class="sh">
+$  kdestroy
+$  kinit -p pablo/admin
+$  ldapsearch  -ZZQLLL -s base contextCSN
+dn: dc=example,dc=com
+contextCSN: 20150112110636.224261Z#000000#000#000000
+</pre>
+<p>Всё отлично.</p>
+<h2><a name="s4"></a>11.4 Настройка клиента</h2>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Когда второй сервер OpenLDAP заработал, нам остаётся настроить клиентов, чтобы они использовали оба. Для этого отредактируем несколько файлов.</p>
+<p>Конфигурация <strong>sudoers</strong> через LDAP (<em>/etc/sudo-ldap.conf</em>):</p>
+<pre class="list">
+<code>BASE    dc=example,dc=com</code>
+<code>URI     ldap://ldap-srv.example.com <strong>ldap://ldap-srv-repl.example.com</strong></code>
+<code>BINDDN  cn=nssproxy,ou=users,dc=example,dc=com </code>
+<code>BINDPW  пароль.пользователя.nssproxy</code>
+<code>TLS_CACERTFILE  /etc/ssl/certs/rootca.crt</code>
+<code>TLS_CRLFILE     /etc/ssl/rootca.crl</code>
+<code>TLS_CHECKPEER   no</code>
+<code>TIMELIMIT       15</code>
+<code>TIMEOUT         20</code>
+<code>SUDOERS_BASE    ou=sudo,ou=services,dc=example,dc=com</code>
+</pre>
+<p>Клиентская конфигурация LDAP (<em>/etc/ldap/ldap.conf</em>):</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv.example.com <strong>ldap://ldap-srv-repl.example.com</strong></code>
+<code>TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code>TLS_CRLFILE /etc/ssl/rootca.crl</code>
+<code>TLS_REQCERT demand</code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+<code>SASL_MECH GSSAPI</code>
+</pre>
+<p>Конфигурация локальной службы имён (<em>/etc/nslcd.conf</em>):</p>
+<pre class="list">
+<code>uid nslcd</code>
+<code>gid nslcd</code>
+<code>uri ldap://ldap-srv.example.com</code>
+<code><strong>uri ldap://ldap-srv-repl.example.com</strong></code>
+<code>base dc=example,dc=com</code>
+<code>binddn cn=nssproxy,ou=users,dc=example,dc=com</code>
+<code>bindpw nssproxyuserpass</code>
+<code>rootpwmoddn cn=admin,dc=example,dc=com</code>
+<code>base group ou=groups,dc=example,dc=com</code>
+<code>base passwd ou=users,dc=example,dc=com</code>
+<code>base shadow ou=users,dc=example,dc=com</code>
+<code>bind_timelimit 5</code>
+<code>timelimit 10</code>
+<code>idle_timelimit 60</code>
+<code>ssl start_tls</code>
+<code>tls_reqcert demand</code>
+<code>tls_cacertfile /etc/ssl/certs/rootca.crt</code>
+<code>nss_initgroups_ignoreusers bin,daemon,games,lp,mail,nobody,nslcd,root,sshd,sync,uucp</code>
+<code>nss_initgroups_ignoreusers sys,man,news,proxy,www-data,backup,list,irc,gnats,landscape</code>
+</pre>
+<p>Конфигурация Kerberos (<em>/etc/krb5.conf</em>):</p>
+<pre class="list">
+<code>[logging]</code>
+<code> default = SYSLOG:INFO:LOCAL1</code>
+<code> kdc = SYSLOG:NOTICE:LOCAL1</code>
+<code> admin_server = SYSLOG:WARNING:LOCAL1</code>
+<code></code>
+<code>[libdefaults]</code>
+<code> default_realm = EXAMPLE.COM</code>
+<code> dns_lookup_realm = false</code>
+<code> dns_lookup_kdc = false</code>
+<code> ticket_lifetime = 24h</code>
+<code> renew_lifetime = 7d</code>
+<code> forwardable = true</code>
+<code></code>
+<code>[realms]</code>
+<code> EXAMPLE.COM = {</code>
+<code>  kdc = ldap-srv.example.com</code>
+<code>  <strong>kdc = ldap-srv-repl.example.com</strong></code>
+<code>  admin_server = ldap-srv.example.com</code>
+<code>  <strong>master_kdc = ldap-srv.example.com</strong></code>
+<code>  default_domain = example.com</code>
+<code>  database_module = openldap_ldapconf</code>
+<code> }</code>
+<code></code>
+<code>[domain_realm]</code>
+<code> .example.com = EXAMPLE.COM</code>
+<code> example.com = EXAMPLE.COM</code>
+<code></code>
+<code>[appdefaults]</code>
+<code> pam = {</code>
+<code>  debug = false</code>
+<code>  ticket_lifetime = 36000</code>
+<code>  renew_lifetime = 36000</code>
+<code>  forwardable = true</code>
+<code>  krb4_convert = false</code>
+<code> }</code>
+</pre>
+<p>Как можно видеть, изменения требуются совсем небольшие. Поэтому, возможно, Вы захотите такой процесс автоматизировать. Сделать это можно разными путями. От простой раздачи файлов по сети с помощью ftp/http/nfs до развесистой системы управления версиями вроде <a href="https://puppetlabs.com/">Puppet</a>.</p>
+<p>После внесения всех изменений на клиентской машине, попробуйте выключить <strong>ldap-srv.example.com</strong> и проверить, будут ли доступны сервисы, которые он поддерживал, с нового сервера <strong>ldap-srv-repl.example.com</strong>.</p>
+
+<h2><a name="s5"></a>11.5 Устранение проблем</h2>
+<h3><a name="s5.1"></a>11.5.1 Настройка журналирования Syncrepl</h3>
+<p>Если Вы испытываете трудности с Syncrepl, попробуйте настроить журналирование:</p>
+<pre class="sh">
+ldapmodify -Z &lt;&lt;-EOF
+dn: cn=config
+changetype: modify
+replace: olcLogLevel
+olcLogLevel: stats sync
+EOF
+</pre>
+<p>Вы можете сделать это как на поставщике, так и на потребителе.</p>
+
+<h3><a name="s5.2"></a>11.5.2 syncrepl_message_to_entry</h3>
+<p>Если в журнале <em>slapd.log</em> Вы видите подобную запись:
+<pre class="list">syncrepl_message_to_entry: rid=000 mods check (objectClass: value #1 invalid per syntax)</pre>
+то это значит, что на сервере-реплике нет необходимой схемы набора данных. Конечно, значение <code>rid=000</code> может быть другим на Вашем сервере. Это идентификатор репликации, задаваемый в атрибуте <code>olcSyncrepl</code> на севере-реплике. Сравните набор загруженных схем с основным сервером (поставщиком). Они должны совпадать. Выявите, каких схем не хватает, выполнив на каждом сервере запрос:</p>
+<pre class="sh">$  ldapsearch -ZZQLLLb cn=schema,cn=config dn</pre>
+<p class="place">Где работаем: <strong>ldap-srv-repl</strong></p>
+<p>Загрузите недостающие схемы на сервер-реплику, пользуясь таким шаблоном (с использованием Kerberos):</p>
+<pre class="sh">$  ldapadd -ZZQf schema.ldif</pre>
+<p>За дополнительной информацией обратитесь к <a href="init.html#s5">разделу 2.5</a>.</p>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Репликация сервера OpenLDAP</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

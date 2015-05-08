@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Настройка DNS - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка DNS</p>
+
+<h1>1. Настройка DNS</h1>
+<p>Для наших целей необходим настроенный DNS-сервер. Если в Вашей сети уже имеется DNS-сервер и он успешно разрешает имена для перечисленных выше машин, то  пункт 1.1 можно пропустить. Помните об этом, если в последующих разделах Вы встретите упоминание о сервере DNS (<strong>dns-srv</strong>).</p>
+<h2><a name="s1"></a>1.1 Настройка DNS-сервера</h2>
+<p class="place">Где работаем: <strong>dns-srv</strong></p>
+<p>Настроим сеть в файле <em>/etc/network/interfaces</em>:</p>
+<pre class="list">
+<code>auto lo</code>
+<code>iface lo inet loopback</code>
+<code></code>
+<code>auto eth0</code>
+<code>iface eth0 inet static</code>
+<code>        address 192.168.122.140</code>
+<code>        netmask 255.255.255.0</code>
+<code>        gateway 192.168.122.1</code>
+<code>        dns-nameservers 192.168.122.1</code>
+</pre>
+<p>Настроим имя DNS-сервера. В Ubuntu 14.04 останов или перезапуск сервиса <strong>networking</strong> не поддерживается, поэтому придётся сделать так:</p>
+<pre class="sh">
+#  echo 'dns-srv.example.com' &gt; /etc/hostname
+#  reboot
+</pre>
+<p>Установим DNS сервер. Будем использовать простой <strong>dnsmasq</strong>:</p>
+<pre class="sh">#  apt-get install dnsmasq</pre>
+<p>Убедимся, что он работает:</p>
+<pre class="sh">$  dig ubuntu.com @localhost | grep ^ubuntu.com</pre>
+<p>Должны получить примерно это:</p>
+<pre class="sh">ubuntu.com. 310 IN A 91.189.94.156</pre>
+<p>Настроим разрешение имён в файле <em>/etc/hosts</em>:</p>
+<pre class="list">
+<code>127.0.0.1        localhost</code>
+<code>192.168.122.140  dns-srv.example.com</code>
+<code></code>
+<code>192.168.122.150  ldap-srv.example.com</code>
+<code>192.168.122.151  ldap-client.example.com</code>
+</pre>
+
+<h2><a name="s2"></a>1.2 Начальная настройка сервера и клиента LDAP</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Настроим сеть в файле <em>/etc/network/interfaces</em>:</p>
+<pre class="list">
+<code>auto lo</code>
+<code>iface lo inet loopback</code>
+<code></code>
+<code>auto eth0</code>
+<code>iface eth0 inet static</code>
+<code>        address 192.168.122.150</code>
+<code>        netmask 255.255.255.0</code>
+<code>        gateway 192.168.122.1</code>
+<code>        dns-nameservers 192.168.122.140</code>
+</pre>
+<p>Настроим имя LDAP-сервера. В Ubuntu 14.04 останов или перезапуск сервиса <strong>networking</strong> не поддерживается, поэтому придётся сделать так:</p>
+<pre class="sh">
+#  echo 'ldap-srv.example.com' &gt; /etc/hostname
+#  reboot
+</pre>
+<p>Проверим разрешение имени будущего сервера LDAP:</p>
+<pre class="sh">
+$  dig ldap-srv.example.com +short
+192.168.122.150
+</pre>
+<p>Проверим обратное разрешение имени:</p>
+<pre class="sh">
+$  dig -x `dig ldap-srv.example.com +short` +short
+ldap-srv.example.com.
+</pre>
+
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Настроим сеть в файле <em>/etc/network/interfaces</em>:</p>
+<pre class="list">
+<code>auto lo</code>
+<code>iface lo inet loopback</code>
+<code></code>
+<code>auto eth0</code>
+<code>iface eth0 inet static</code>
+<code>        address 192.168.122.151</code>
+<code>        netmask 255.255.255.0</code>
+<code>        gateway 192.168.122.1</code>
+<code>        dns-nameservers 192.168.122.140</code>
+</pre>
+<p>Настроим имя LDAP-клиента. В Ubuntu 14.04 останов или перезапуск сервиса <strong>networking</strong> не поддерживается, поэтому придётся сделать так:</p>
+<pre class="sh">
+#  echo 'ldap-client.example.com' &gt; /etc/hostname
+#  reboot
+</pre>
+<p>Проверим разрешение имени будущего клиента LDAP:</p>
+<pre class="sh">
+$  dig ldap-client.example.com +short
+192.168.122.151
+</pre>
+<p>Проверим обратное разрешение имени:</p>
+<pre class="sh">$  dig -x `dig ldap-client.example.com +short` +short
+ldap-client.example.com.
+</pre>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка DNS</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Настройка аутентификации пользователей - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка аутентификации пользователей через OpenLDAP на клиенте</p>
+
+<h1>5. Настройка аутентификации пользователей через OpenLDAP на клиенте</h1>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Перейдём к настройке клиентской рабочей станции. Для начала установим необходимые пакеты:</p>
+<pre class="sh">#  apt-get install ldap-utils libnss-ldapd libpam-ldapd</pre>
+<p>При установке нам будут предложены некоторые настройки . Далее мы всё равно внесём в конфигурацию изменения, но это нужно сделать, чтобы все пакеты нормально установились:</p>
+<ul>
+<li>URI сервера LDAP: <code>ldap://ldap-srv.example.com</code>;</li>
+<li>База поиска сервера LDAP: <code>dc=example,dc=com</code>;</li>
+<li>Имена настраиваемых служб: <code>group</code>,<code>netgroup</code>,<code>passwd</code>,<code>shadow</code>.</li>
+</ul>
+<p>Прежде чем делать запросы к LDAP-серверу, проверим параметры клиента в <em>/etc/ldap/ldap.conf</em>:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv.example.com</code>
+<code>TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code>TLS_REQCERT demand</code>
+<code>TLS_CRLFILE /etc/ssl/rootca.crl</code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+</pre>
+<p>Конечно, для того, чтобы всё заработало, сертификат нашего Certificate Authority (<em>rootca.crt</em>) и CRL-файл (<em>rootca.crl</em>) должны быть на месте.</p>
+<p>Проверим работоспособность простым запросом. Результат опустим (Вы должны увидеть всё DIT):</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=nssproxy,ou=users,dc=example,dc=com
+Enter LDAP Password:
+dn: dc=example,dc=com
+...
+</pre>
+<p>Поправим конфигурацию нашей локальной службы имён LDAP в файле <em>/etc/nslcd.conf</em>. Измените значение директивы <code>bindpw</code> на пароль записи <code>cn=nssproxy,ou=users,dc=example,dc=com</code>, который мы задавали ранее:</p>
+<pre class="list">
+<code>uid nslcd</code>
+<code>gid nslcd</code>
+<code>uri ldap://ldap-srv.example.com</code>
+<code>base dc=example,dc=com</code>
+<code>binddn cn=nssproxy,ou=users,dc=example,dc=com</code>
+<code>bindpw пароль.пользователя.nssproxy</code>
+<code>rootpwmoddn cn=admin,dc=example,dc=com</code>
+<code>base group ou=groups,dc=example,dc=com</code>
+<code>base passwd ou=users,dc=example,dc=com</code>
+<code>base shadow ou=users,dc=example,dc=com</code>
+<code>bind_timelimit 5</code>
+<code>timelimit 10</code>
+<code>idle_timelimit 60</code>
+<code>ssl start_tls</code>
+<code>tls_reqcert allow</code>
+<code>tls_cacertfile /etc/ssl/certs/rootca.crt</code>
+<code>nss_initgroups_ignoreusers bin,daemon,games,lp,mail,nobody,nslcd,root,sshd,sync,uucp</code>
+<code>nss_initgroups_ignoreusers sys,man,news,proxy,www-data,backup,list,irc,gnats,landscape</code>
+</pre>
+<p>Краткое описание использованных директив:</p>
+<ul>
+<li>С помощью директивы <code>base</code> мы сообщаем демону <strong>nslcd</strong>, где в DIT искать ту или иную информацию;</li>
+<li><code>bind_timelimit</code> ограничивает время на установление соединения с сервером пятью секундами;</li>
+<li><code>timelimit</code> устанавливает максимальное время ожидания ответа от сервера в 10 секунд;</li>
+<li><code>idle_timelimit</code> заставит <strong>nslcd</strong> разорвать соединение с сервером, если в течении минуты в соединении не было никакой активности;</li>
+<li><code>ssl</code> заставляет клиента использовать TLS при подключении к серверу;</li>
+<li><code>tls_reqcert</code> и <code>tls_cacertfile</code> подобны директивам <code>TLS_REQCERT</code> и <code>TLS_CACERT</code> в конфигурации <em>/etc/ldap/ldap.conf</em> (необходимость проверки сертификата сервера и путь к корневому сертификату для выполнения проверки);</li>
+<li><code>nss_initgroups_ignoreusers</code> описывает пользователей системы, поиск которых не нужно производить в DIT (чтобы мы могли работать с машиной при проблемах с доступом к серверу каталогов). В значение этой директивы следует внести имена всех общесистемных пользователей.</li>
+</ul>
+<p>Поменяем права доступа к <em>nslcd.conf</em>, потому что теперь в нём хранится информация для аутентификации:</p>
+<pre class="sh">
+#  chmod 600 /etc/nslcd.conf
+#  chown nslcd:nslcd /etc/nslcd.conf
+</pre>
+<p>Проверим содержимое <em>/etc/nsswitch.conf</em>:</p>
+<pre class="list">
+<code>passwd:         compat ldap</code>
+<code>group:          compat ldap</code>
+<code>shadow:         compat ldap</code>
+<code></code>
+<code>hosts:          files dns</code>
+<code>networks:       files</code>
+<code></code>
+<code>protocols:      db files</code>
+<code>services:       db files</code>
+<code>ethers:         db files</code>
+<code>rpc:            db files</code>
+<code></code>
+<code>netgroup:       nis ldap</code>
+</pre>
+<p>Убедимся в том, что демон <strong>nslcd</strong> запускается при старте системы и перезапустим его:</p>
+<pre class="sh">
+#  update-rc.d nslcd defaults
+ System start/stop links for /etc/init.d/nslcd already exist.
+#  service nslcd restart
+ * Starting LDAP connection daemon nslcd  [ OK ]
+</pre>
+<p>Убедимся, что в системе <strong>ldap-client</strong> <strong>НЕТ</strong> учётной записи с именем <strong>nssproxy</strong>. Следующая команда должна выполняться без результата:</p>
+<pre class="sh">$  grep nssproxy /etc/passwd</pre>
+<p>Убедимся так же, что кэширующий демон службы имён загружается при старте системы и перезапустим его:</p>
+<pre class="sh">
+#  update-rc.d nscd defaults
+ System start/stop links for /etc/init.d/nscd already exist.
+#  service nscd restart
+ * Restarting Name Service Cache Daemon nscd
+   ...done.
+</pre>
+<p>Сделаем пару запросов к LDAP-серверу, используя настроенную нами систему:</p>
+<pre class="sh">
+$  getent passwd test.user
+test.user:x:1101:1101:Test User:/home/test.user:/bin/bash
+$  getent group test.group
+test.group:*:1101:
+</pre>
+<p>Для того, чтобы проверить доступность информации о пароле потребуется выполнить <strong>getent</strong> от имени пользователя <strong>root</strong>:</p>
+<pre class="sh">
+#  getent shadow test.user
+test.user:*:15140:0:99999:7:::0
+</pre>
+<p>Не беспокойтесь, хэш пароля мы видеть не должны.</p>
+<p>Отлично, всё работает! Вышеприведённые результаты команд означают, что система <strong>ldap-client</strong> может осуществлять поиск по данным пользователей  и групп в нашем каталоге OpenLDAP.</p>
+<p>Создадим домашний каталог нашего тестового пользователя и установим для него права доступа:</p>
+<pre class="sh">
+#  mkdir /home/test.user
+#  chown test.user:test.group /home/test.user
+</pre>
+<p>Запустим в отдельном терминале вывод журнала аутентификации:</p>
+<pre class="sh">#  tail -f /var/log/auth.log</pre>
+<p>В другом терминале выполним:</p>
+<pre class="sh">$  su - test.user</pre>
+<p>Мы должны получить приглашение командной строки пользователя <strong>test.user</strong>.</p>
+<p>Теперь попробуем зайти на машину <strong>ldap-client</strong> по сети с использованием <strong>ssh</strong> под учётной записью <strong>test.user</strong>.</p>
+<p>Демон <strong>ssh</strong> в конфигурации по-умолчанию должен работать с поддержкой PAM (и, соответственно, поддерживать аутентификацию через LDAP). Но на всякий случай приведём рабочую конфигурацию <em>/etc/ssh/sshd_config</em>:</p>
+<pre class="list">
+<code>Port 22</code>
+<code>Protocol 2</code>
+<code>HostKey /etc/ssh/ssh_host_rsa_key</code>
+<code>HostKey /etc/ssh/ssh_host_dsa_key</code>
+<code>HostKey /etc/ssh/ssh_host_ecdsa_key</code>
+<code>HostKey /etc/ssh/ssh_host_ed25519_key</code>
+<code>UsePrivilegeSeparation yes</code>
+<code>KeyRegenerationInterval 3600</code>
+<code>ServerKeyBits 1024</code>
+<code>LogLevel INFO</code>
+<code>LoginGraceTime 120</code>
+<code>PermitRootLogin without-password</code>
+<code>StrictModes yes</code>
+<code>RSAAuthentication yes</code>
+<code>PubkeyAuthentication yes</code>
+<code>IgnoreRhosts yes</code>
+<code>RhostsRSAAuthentication no</code>
+<code>HostbasedAuthentication no</code>
+<code>PermitEmptyPasswords no</code>
+<code>ChallengeResponseAuthentication no</code>
+<code>X11Forwarding yes</code>
+<code>X11DisplayOffset 10</code>
+<code>PrintMotd no</code>
+<code>PrintLastLog yes</code>
+<code>TCPKeepAlive yes</code>
+<code>AcceptEnv LANG LC_*</code>
+<code>Subsystem sftp /usr/lib/openssh/sftp-server</code>
+<code>UsePAM yes</code>
+<code></code>
+<code>AddressFamily inet</code>
+<code>AllowGroups sysadmin test.group</code>
+<code>SyslogFacility AUTHPRIV</code>
+<code>PasswordAuthentication yes</code>
+<code>AllowTcpForwarding no</code>
+<code>ClientAliveInterval 120</code>
+<code>ClientAliveCountMax 2</code>
+</pre>
+<p>Часть файла до пустой строки&thinsp;&mdash;&thinsp;конфигурация по-умолчанию. Далее&thinsp;&mdash;&thinsp;добавленное нами. Обратите внимание на строку с директивой <code>AllowGroups</code>. С помощью неё мы ограничиваем список групп пользователей, которые могут быть аутентифицированы через <strong>ssh</strong>. За информацией по остальным директивам обратитесь к документации.</p>
+<p>Проверим работу с использованием какой-нибудь третьей машины. Например, выполним на нашем DNS-сервере (<strong>dns-srv</strong>):</p>
+<pre class="sh">
+$  ssh test.user@ldap-client.example.com
+Password:
+test.user@ldap-client:~$
+</pre>
+<p>Вывод последней команды сокращён. Если появляется приглашение командной строки, значит всё в порядке!</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Давайте заглянем в <em>/var/log/slapd.log</em> на нашем сервере. Мы можем обнаружить там следующие строки:</p>
+<pre class="list">
+ldap-srv slapd[1304]: &lt;= mdb_equality_candidates: (objectClass) not indexed
+ldap-srv slapd[1304]: &lt;= mdb_equality_candidates: (uid) not indexed
+</pre>
+<p>С помощью следующей команды мы можем убедиться, что в нашем каталоге пока нет никаких индексов:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b olcDatabase={1}mdb,cn=config olcDbIndex
+Enter LDAP Password:
+dn: olcDatabase={1}mdb,cn=config
+</pre>
+<p>Это значит, что в нашей базе данных надо создать индексы для атрибутов из журнала  <em>/var/log/slapd.log</em>. Поэтому создадим ещё один LDIF-файл <em>5-posixAccount.indexes.ldif</em> и запишем в него:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: default pres,eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: uid</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: cn,sn pres,eq,sub</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: objectClass eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: memberUid eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: uniqueMember eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: uidNumber</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: gidNumber eq</code>
+</pre>
+<p>Зачем мелочиться? Укажем по-больше индексируемых атрибутов. И загрузим конфигурацию в наш каталог:</p>
+<pre class="sh">
+$  ldapadd -xZZWD cn=admin,dc=example,dc=com -f posixAccount.indexes.ldif
+Enter LDAP Password:
+modifying entry "olcDatabase={1}mdb,cn=config"
+</pre>
+<p>Проверим результат изменений:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b olcDatabase={1}mdb,cn=config olcDbIndex
+Enter LDAP Password:
+dn: olcDatabase={1}mdb,cn=config
+olcDbIndex: default pres,eq
+olcDbIndex: uid
+olcDbIndex: cn,sn pres,eq,sub
+olcDbIndex: objectClass eq
+olcDbIndex: memberUid eq
+olcDbIndex: uniqueMember eq
+olcDbIndex: uidNumber
+olcDbIndex: gidNumber eq
+</pre>
+<p>Отлично! Теперь в журнале <em>/var/log/slapd.log</em> не должно быть ошибок.</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Настройка аутентификации пользователей через OpenLDAP на клиенте</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

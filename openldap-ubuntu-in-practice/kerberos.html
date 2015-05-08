@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Kerberos KDC - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Kerberos KDC с использованием OpenLDAP в качестве бэкэнда и аутентификацией SASL GSSAPI</p>
+
+<h1>9. Kerberos KDC с использованием OpenLDAP в качестве бэкэнда и аутентификацией SASL GSSAPI</h1>
+<p>В этом разделе мы научимся использовать OpenLDAP 2.4 в качестве хранилища принципалов (principals) <a href="http://web.mit.edu/kerberos/">Kerberos</a> и разберем, как настраивать клиентские рабочие станции. <a href="https://ru.wikipedia.org/wiki/Kerberos">Kerberos</a>&thinsp;&mdash;&thinsp;это сетевой протокол, который работает на основе билетов (tickets) и позволяет передавать данные через незащищённые сети для безопасной идентификации и аутентификации. Его дизайн преимущественно опирается на клиент-серверную модель и позволяет произвести взаимную аутентификацию субъекта и объекта доступа. Сообщения протокола устойчивы к прослушиванию и атакам повтора. Kerberos работает на основе криптографии с симметричным ключом и требует наличия доверенной третьей стороны, а так же может применяться с использованием криптографии с открытым ключом на некоторых этапах процесса аутентификации.</p>
+<p>В этом руководстве в роли сервера Kerberos будем использовать <strong>ldap-srv</strong>. Но ничто не мешает Вам использовать для этого отдельную машину.</p>
+
+<h2><a name="s1"></a>9.1 Настройка сервера</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p><strong>Включите <a href="https://ru.wikipedia.org/wiki/NTP">NTP</a> и убедитесь, что сервер и клиенты синхронизированы!</strong> Мы не будем описывать, как настраивать <a href="http://www.ntp.org/">NTP</a>. Вы можете найти множество примеров в сети, если потребуется.</p>
+<p>Теперь, когда наш сервер OpenLDAP настроен, мы можем приступить к конфигурированию сервера Kerberos. В этом разделе мы опишем, как развернуть центр распределения ключей Kerberos (KDC, Key Distribution Center) для области (realm) EXAMPLE.COM. Начнём с установки необходимых пакетов. В процессе будет так же установлено несколько пакетов-зависимостей. Пакет <strong>wamerican</strong> создаст файл <em>/usr/share/dict/words</em>, используемый <strong>kadmind</strong>. Вместо него можно использовать любой другой словарь или несколько словарей. Чтобы посмотреть их список, посмотрите содержимое метапакета <strong>wordlist</strong>.</p>
+<pre class="sh">#  apt-get install krb5-kdc krb5-pkinit krb5-admin-server wamerican libsasl2-modules-gssapi-mit</pre>
+<p>В <a href="init.html#s5">разделе 2.5</a> мы уже установили схему Kerberos для OpenLDAP сервера, но давайте лишний раз убедимся, что она на месте:</p>
+<pre class="sh">
+#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b cn=schema,cn=config dn | grep -i kerberos
+dn: cn={12}kerberos,cn=schema,cn=config
+</pre>
+<p>Схема на месте. В ней содержится достаточно много объектов. Чтобы посмотреть их все, используйте следующий запрос:</p>
+<pre class="sh">#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b cn={12}kerberos,cn=schema,cn=config | grep NAME | cut -d' ' -f5 | sort</pre>
+<p>Эта команда должна вернуть список объектов. Это важно, потому что если новых атрибутов Kerberos LDAP нет, то <strong>kdb5_ldap_util</strong>(8) выдаст следующую ошибку:</p>
+<pre class="sh">kdb5_ldap_util: Kerberos Container create FAILED: No such object while creating realm 'EXAMPLE.COM'</pre>
+<p>Итак, у нас есть набор схемы данных и объекты. Но есть ли у нас контейнер для принципалов Kerberos?</p>
+<pre class="sh">#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b ou=services,dc=example,dc=com dn | grep -i kerberos</pre>
+<p>Нет, нету. Создадим его, а заодно&thinsp;&mdash;&thinsp;пользователя и группу, которые будут использоваться Kerberos для взаимодействия с сервером OpenLDAP. Используем для этой цели вот такой LDIF-файл <em>9.1-kerberos.ldif</em>:</p>
+<pre class="list">
+<code class="c"># Создадим контейнер для Kerberos</code>
+<code>dn: cn=kerberos,ou=services,dc=example,dc=com</code>
+<code>cn: kerberos</code>
+<code>objectClass: top</code>
+<code>objectClass: krbContainer</code>
+<code></code>
+<code class="c"># Добавим группу krbadmin</code>
+<code>dn: cn=krbadmin,ou=groups,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: posixGroup</code>
+<code>cn: krbadmin</code>
+<code>gidNumber: 800</code>
+<code>description: Kerberos administrator's group.</code>
+<code></code>
+<code class="c"># Добавим пользователя krbadmin</code>
+<code>dn: cn=krbadmin,ou=users,dc=example,dc=com</code>
+<code>objectClass: inetOrgPerson</code>
+<code>objectClass: organizationalPerson</code>
+<code>objectClass: person</code>
+<code>objectClass: posixAccount</code>
+<code>objectClass: top</code>
+<code>cn: krbadmin</code>
+<code>givenName: Kerberos Administrator</code>
+<code>mail: kerberos.admin@example.com</code>
+<code>sn: krbadmin</code>
+<code>uid: krbadmin</code>
+<code>uidNumber: 800</code>
+<code>gidNumber: 800</code>
+<code>homeDirectory: /home/krbadmin</code>
+<code>loginShell: /bin/false</code>
+<code>displayname: Kerberos Administrator</code>
+</pre>
+<p>Загрузим этот файл в базу данных нашего сервера каталогов:</p>
+<pre class="sh">
+$  ldapadd -xZZWD cn=admin,dc=example,dc=com -f ~/ldap/9.1-kerberos.ldif
+Enter LDAP Password:
+adding new entry "cn=kerberos,ou=services,dc=example,dc=com"
+adding new entry "cn=krbadmin,ou=groups,dc=example,dc=com"
+adding new entry "cn=krbadmin,ou=users,dc=example,dc=com"
+</pre>
+<p>Зададим пароль для пользователя <strong>krbadmin</strong>. Сохраните пароль в надежном месте (например, используя <a href="http://keepass.info/">keepass</a> или <a href="https://www.gnupg.org/">gpg</a>).</p>
+<pre class="sh">$  ldappasswd -xZZWSD "cn=admin,dc=example,dc=com" "cn=krbadmin,ou=users,dc=example,dc=com"</pre>
+<p>Создадим конфигурационный файл Kerberos <em>/etc/krb5.conf</em>:</p>
+<pre class="list">
+<code>[logging]</code>
+<code> default = SYSLOG:INFO:LOCAL1</code>
+<code> kdc = SYSLOG:NOTICE:LOCAL1</code>
+<code> admin_server = SYSLOG:WARNING:LOCAL1</code>
+<code></code>
+<code>[libdefaults]</code>
+<code> default_realm = EXAMPLE.COM</code>
+<code> dns_lookup_realm = false</code>
+<code> dns_lookup_kdc = false</code>
+<code> ticket_lifetime = 24h</code>
+<code> renew_lifetime = 7d</code>
+<code> forwardable = true</code>
+<code></code>
+<code>[realms]</code>
+<code> EXAMPLE.COM = {</code>
+<code>  kdc = ldap-srv.example.com</code>
+<code>  admin_server = ldap-srv.example.com</code>
+<code>  default_domain = example.com</code>
+<code>  database_module = openldap_ldapconf</code>
+<code> }</code>
+<code></code>
+<code>[domain_realm]</code>
+<code> .example.com = EXAMPLE.COM</code>
+<code> example.com = EXAMPLE.COM</code>
+<code></code>
+<code>[appdefaults]</code>
+<code> pam = {</code>
+<code>  debug = false</code>
+<code>  ticket_lifetime = 36000</code>
+<code>  renew_lifetime = 36000</code>
+<code>  forwardable = true</code>
+<code>  krb4_convert = false</code>
+<code> }</code>
+<code></code>
+<code>[dbmodules]</code>
+<code> openldap_ldapconf = {</code>
+<code>  db_library = kldap</code>
+<code>  ldap_kerberos_container_dn = cn=kerberos,ou=services,dc=example,dc=com</code>
+<code>  ldap_kdc_dn = cn=krbadmin,ou=users,dc=example,dc=com</code>
+<code class="c">   # этот объект должен иметь права на чтение контейнера области,</code>
+<code class="c">   # контейнера принципала и поддеревьев области</code>
+<code>  ldap_kadmind_dn = cn=krbadmin,ou=users,dc=example,dc=com</code>
+<code class="c">   # этот объект должен иметь права на чтение контейнера области,</code>
+<code class="c">   # контейнера принципала и поддеревьев области</code>
+<code>  ldap_service_password_file = /etc/krb5.d/stash.keyfile</code>
+<code>  ldap_servers = ldapi:///</code>
+<code>  ldap_conns_per_server = 5</code>
+<code> }</code>
+</pre>
+<p>Теперь создадим список контроля доступа (ACL) администратора Kerberos. Не путайте этот ACL с ACL OpenLDAP. Это не одно и то же. Чуть ниже мы поработаем с ACL для OpenLDAP. Создадим файл <em>/etc/krb5kdc/kadm5.acl</em> с таким содержимым:</p>
+<pre class="list"><code>*/admin@EXAMPLE.COM *</code></pre>
+<p>Отредактируем <em>/etc/krb5kdc/kdc.conf</em>, конфигурационный файл службы аутентификации (AS, Authentication Service) и центра распределения ключей (KDC):</p>
+<pre class="list">
+<code>[kdcdefaults]</code>
+<code> kdc_ports = 88</code>
+<code> kdc_tcp_ports = 88</code>
+<code></code>
+<code>[realms]</code>
+<code> EXAMPLE.COM = {</code>
+<code class="c">  #master_key_type = aes256-cts</code>
+<code>  acl_file = /etc/krb5kdc/kadm5.acl</code>
+<code>  dict_file = /usr/share/dict/words</code>
+<code>  admin_keytab = /etc/krb5kdc/kadm5.keytab</code>
+<code>  supported_enctypes = aes256-cts:normal aes128-cts:normal des3-hmac-sha1:normal arcfour-hmac:normal des-hmac-sha1:normal des-cbc-md5:normal des-cbc-crc:normal</code>
+<code> }</code>
+</pre>
+<p>В отдельном терминале включите просмотр журнала сервера OpenLDAP. Так мы сможем увидеть сообщения, генерируемые командой <strong>kdb5_ldap_util</strong>(8):</p>
+<pre class="sh">#  tail -F /var/log/slapd.log</pre>
+<p>Создайте каталог-тайник для пароля. В файле <em>/etc/krb5.conf</em> он указан в переменной <code>ldap_service_password_file</code>:</p>
+<pre class="sh">
+#  mkdir /etc/krb5.d
+#  chmod u=rwx,g=,o= /etc/krb5.d
+</pre>
+<p>Извлеките пароль пользователя <code>cn=krbadmin,ou=users,dc=example,dc=com</code>, используя <strong>kdb5_ldap_util</strong>(8):</p>
+<pre class="sh">#  kdb5_ldap_util -D "cn=admin,dc=example,dc=com" stashsrvpw -f /etc/krb5.d/stash.keyfile cn=krbadmin,ou=users,dc=example,dc=com</pre>
+<p>Вам будет предложено ввести мастер-пароль базы данных. Очень важно, чтобы Вы НЕ ЗАБЫЛИ этот пароль!</p>
+<p>В основном терминале выполните следующую команду для добавления записей Kerberos в базу данных OpenLDAP:</p>
+<pre class="sh">#  kdb5_ldap_util -D "cn=admin,dc=example,dc=com" create -subtrees "cn=kerberos,ou=services,dc=example,dc=com" -r EXAMPLE.COM -s</pre>
+<p>Вышеуказанная команда создаст несколько записей в <code>cn=kerberos,ou=services,dc=example,dc=com</code>. Чтобы увидеть их, выполните запрос:</p>
+<pre class="sh">#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b cn=kerberos,ou=services,dc=example,dc=com dn</pre>
+<p>Но может ли кто-нибудь кроме пользователя <code>cn=admin</code> увидеть нашу информацию Kerberos? Это было-бы не очень мудро. Поэтому давайте взглянём на ACL нашего сервера OpenLDAP:</p>
+<pre class="sh">#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b olcDatabase={1}mdb,cn=config olcAccess</pre>
+<p>Что нам надо сделать, так это дать права доступа на чтение/запись администратору Kerberos (<code>cn=krbadmin,ou=users,dc=example,dc=com</code>) к поддереву <code>cn=kerberos,ou=services,dc=example,dc=com</code>. Никакой другой пользователь не должен иметь доступа к этой информации (за исключением администратора каталога).</p>
+<p>Для этого сформируем LDIF-файл <em>9.1-kerberos.acl.ldif</em>:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>replace: olcAccess</code>
+<code>olcAccess: {0}to *</code>
+<code>  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage</code>
+<code>  by * break</code>
+<code>olcAccess: {1}to attrs=userPassword,userPKCS12</code>
+<code>  by self write</code>
+<code>  by anonymous auth</code>
+<code>olcAccess: {2}to attrs=shadowLastChange</code>
+<code>  by self write</code>
+<code>olcAccess: {3}to dn.subtree="cn=kerberos,ou=services,dc=example,dc=com"</code>
+<code>  by dn.exact="cn=krbadmin,ou=users,dc=example,dc=com" manage</code>
+<code>olcAccess: {4}to *</code>
+<code>  by dn.base="cn=nssproxy,ou=users,dc=example,dc=com" read</code>
+<code>  by self read</code>
+</pre>
+<p>Загрузим данные в сервер каталогов:</p>
+<pre class="sh">#  ldapmodify -QY EXTERNAL -H ldapi:/// -f 9.1-kerberos.acl.ldif</pre>
+<p>Убедитесь, что новые ACL работают. Суперпользователь и пользователь <code>cn=admin,dc=example,dc=com</code> должны иметь доступ к поддереву <code>cn=kerberos,ou=services,dc=example,dc=com</code>. Пользователь <code>cn=nssproxy,ou=users,dc=example,dc=com</code> не сможет обнаружить само существование контейнера Kerberos, а <code>cn=krbadmin,ou=users,dc=example,dc=com</code> должен не только видеть контейнер, но и иметь для него права на чтение/запись. Мы так же должны убедиться, что обычные пользователи всё ещё могут использовать сервер OpenLDAP для аутентификации и что они могут менять себе пароли.</p>
+<p>Этот запрос возвращает поддерево <code>cn=kerberos,ou=services,dc=example,dc=com</code>:</p>
+<pre class="sh">$  ldapsearch -xZZLLLWD cn=krbadmin,ou=users,dc=example,dc=com -b cn=kerberos,ou=services,dc=example,dc=com dn</pre>
+<p>Следующий запрос должен завершиться с ошибкой <code>No such object (32)</code>:</p>
+<pre class="sh">$  ldapsearch -xZZLLLWD cn=nssproxy,ou=users,dc=example,dc=com -b cn=kerberos,ou=services,dc=example,dc=com dn</pre>
+<p>Теперь с клиентской машины убедимся, что пользователь, учётная запись которого хранится на сервере каталогов, может менять свой пароль:</p>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<pre class="sh">
+$  su - test.user
+$  passwd
+(current) LDAP Password:
+Новый пароль :
+Повторите ввод нового пароля :
+passwd: password updated successfully
+</pre>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Настало время настроить журналирование. Для начала добавим в конфигурацию <strong>rsyslog</strong> следующие строки (<em>/etc/rsyslog.conf</em>):</p>
+<pre class="list">
+<code class="c">...</code>
+<code></code>
+<code class="c"># Пишем журнал демона krb5-kdc в /var/log/krb5kdc.log:</code>
+<code>if $programname == 'krb5kdc' then /var/log/krb5kdc.log</code>
+<code>&amp; ~</code>
+<code></code>
+<code class="c"># Пишем журнал демона krb5-admin-server в /var/log/kadmind.log:</code>
+<code>if $programname == 'kadmind' then /var/log/kadmind.log</code>
+<code>&amp; ~</code>
+</pre>
+<p>Создадим файлы журналов и зададим для них права доступа:</p>
+<pre class="sh">
+#  touch /var/log/{krb5kdc,kadmind}.log
+#  chmod 0640 /var/log/{krb5kdc,kadmind}.log
+#  chown syslog:adm /var/log/{krb5kdc,kadmind}.log
+</pre>
+<p>Настроим <strong>logrotate</strong>. Создадим два конфигурационных файла.</p>
+<p>Файл <em>/etc/logrotate.d/krb5kdc</em> для демона <strong>krb5-kdc</strong>:</p>
+<pre class="list">
+<code>/var/log/krb5kdc.log {</code>
+<code> daily</code>
+<code> missingok</code>
+<code> rotate 7</code>
+<code> compress</code>
+<code> delaycompress</code>
+<code> notifempty</code>
+<code>}</code>
+</pre>
+<p>Файл <em>/etc/logrotate.d/kadmind</em> для демона <strong>krb5-admin-server</strong>:</p>
+<pre class="list">
+<code>/var/log/kadmind.log {</code>
+<code> daily</code>
+<code> missingok</code>
+<code> rotate 7</code>
+<code> compress</code>
+<code> delaycompress</code>
+<code> notifempty</code>
+<code>}</code>
+</pre>
+<p>Перезапустим демон <strong>rsyslog</strong>, чтобы конфигурация вступила в силу. Добавим демоны <strong>krb5-kdc</strong> и <strong>krb5-admin-server</strong> в автоматический запуск, затем запустим их:</p>
+<pre class="sh">
+#  service rsyslog restart
+#  update-rc.d krb5-kdc defaults
+#  update-rc.d krb5-admin-server defaults
+#  service krb5-kdc start
+#  service krb5-admin-server start
+</pre>
+<p>Загляните в журнал <em>/var/log/krb5kdc.log</em>. Вы должны увидеть там подобную строку:</p>
+<pre class="list">
+<span class="c">...</span>
+Dec  1 15:49:54 ldap-srv krb5kdc[1992]: commencing operation
+</pre>
+<p>Проверим, что наши демоны слушают необходимые порты. Порт 88 (<strong>krb5kdc</strong>), порты 464 и 749 (<strong>kadmind</strong>):</p>
+<pre class="sh">
+$  ss -tan | egrep ':88|:464|:749'
+LISTEN     0      2                         *:749                      *:*
+LISTEN     0      5                         *:464                      *:*
+LISTEN     0      5                         *:88                       *:*
+</pre>
+<p>Поздравляю, теперь у Вас есть рабочий сервер аутентификации (AS) и сервер распределения ключей (KDC) MIT Kerberos 5!</p>
+<p>Что дальше? В первую очередь нам необходимо создать принципал для локального сервера. Затем&thinsp;&mdash;&thinsp;принципал для пользователя <strong>test.user</strong>. Сделаем это так (разобъём вывод на части, чтобы добавить комментарии):</p>
+<pre class="sh">
+#  kadmin.local
+Authenticating as principal root/admin@EXAMPLE.COM with password.
+</pre>
+<p>Здесь мы создаём принципал машины для текущего сервера (на котором залогинены). Далее жирный шрифт&thinsp;&mdash;&thinsp;вводимый нами текст:</p>
+<pre class="sh">
+kadmin.local:  <strong>addprinc -randkey host/ldap-srv.example.com@EXAMPLE.COM</strong>
+WARNING: no policy specified for host/ldap-srv.example.com@EXAMPLE.COM; defaulting to no policy
+Principal "host/ldap-srv.example.com@EXAMPLE.COM" created.
+</pre>
+<p>После создания принципала сервера мы можем добавить его в набор ключей Kerberos (<em>/etc/krb5.keytab</em>):</p>
+<pre class="sh">
+kadmin.local:  <strong>ktadd host/ldap-srv.example.com@EXAMPLE.COM</strong>
+Entry for principal host/ldap-srv.example.com@EXAMPLE.COM with kvno 2, encryption type aes256-cts-hmac-sha1-96 added to keytab FILE:/etc/krb5.keytab.
+Entry for principal host/ldap-srv.example.com@EXAMPLE.COM with kvno 2, encryption type aes128-cts-hmac-sha1-96 added to keytab FILE:/etc/krb5.keytab.
+Entry for principal host/ldap-srv.example.com@EXAMPLE.COM with kvno 2, encryption type des3-cbc-sha1 added to keytab FILE:/etc/krb5.keytab.
+Entry for principal host/ldap-srv.example.com@EXAMPLE.COM with kvno 2, encryption type arcfour-hmac added to keytab FILE:/etc/krb5.keytab.
+Entry for principal host/ldap-srv.example.com@EXAMPLE.COM with kvno 2, encryption type des-hmac-sha1 added to keytab FILE:/etc/krb5.keytab.
+Entry for principal host/ldap-srv.example.com@EXAMPLE.COM with kvno 2, encryption type des-cbc-md5 added to keytab FILE:/etc/krb5.keytab.
+</pre>
+<p>Следующим шагом создадим принципал для моего пользователя <strong>pablo</strong> и зададим для него пароль:</p>
+<pre class="sh">
+kadmin.local:  <strong>addprinc pablo@EXAMPLE.COM</strong>
+WARNING: no policy specified for pablo@EXAMPLE.COM; defaulting to no policy
+Enter password for principal "pablo@EXAMPLE.COM": 
+Re-enter password for principal "pablo@EXAMPLE.COM":                             
+Principal "pablo@EXAMPLE.COM" created.
+</pre>
+<p>Теперь создадим принципал пользователя с правами администратора. Помните файл <em>/etc/krb5kdc/kadm5.acl</em>? Вот где он вступает в игру. С помощью этого файла пользователи с префиксом <strong>/admin</strong> имеют права администратора на доступ к области Kerberos. Это значит, что они могут создавать и удалять записи пользователей и политики доступа. Поэтому убедитесь, что Вы знаете этих пользователей и доверяете им!</p>
+<pre class="sh">
+kadmin.local:  <strong>addprinc pablo/admin@EXAMPLE.COM</strong>
+WARNING: no policy specified for pablo/admin@EXAMPLE.COM; defaulting to no policy
+Enter password for principal "pablo/admin@EXAMPLE.COM": 
+Re-enter password for principal "pablo/admin@EXAMPLE.COM": 
+Principal "pablo/admin@EXAMPLE.COM" created.
+</pre>
+<p>Посмотрим список текущих принципалов в области:</p>
+<pre class="sh">
+kadmin.local:  <strong>get_principals</strong>
+K/M@EXAMPLE.COM
+krbtgt/EXAMPLE.COM@EXAMPLE.COM
+kadmin/admin@EXAMPLE.COM
+kadmin/changepw@EXAMPLE.COM
+kadmin/history@EXAMPLE.COM
+kadmin/ldap-srv.example.com@EXAMPLE.COM
+host/ldap-srv.example.com@EXAMPLE.COM
+pablo@EXAMPLE.COM
+pablo/admin@EXAMPLE.COM
+</pre>
+<p>А эта команда выведет подробную информацию о принципале <strong>host/ldap-srv.example.com@EXAMPLE.COM</strong>:</p>
+<pre class="sh">
+kadmin.local:  <strong>getprinc host/ldap-srv.example.com@EXAMPLE.COM</strong>
+Principal: host/ldap-srv.example.com@EXAMPLE.COM
+Expiration date: [never]
+Last password change: Сб. дек. 06 09:21:17 MSK 2014
+Password expiration date: [none]
+Maximum ticket life: 1 day 00:00:00
+Maximum renewable life: 0 days 00:00:00
+Last modified: Сб. дек. 06 09:21:17 MSK 2014 (root/admin@EXAMPLE.COM)
+Last successful authentication: [never]
+Last failed authentication: [never]
+Failed password attempts: 0
+Number of keys: 6
+Key: vno 2, aes256-cts-hmac-sha1-96, no salt
+Key: vno 2, aes128-cts-hmac-sha1-96, no salt
+Key: vno 2, des3-cbc-sha1, no salt
+Key: vno 2, arcfour-hmac, no salt
+Key: vno 2, des-hmac-sha1, no salt
+Key: vno 2, des-cbc-md5, no salt
+MKey: vno 1
+Attributes:
+Policy: [none]
+kadmin.local:  <strong>exit</strong>
+</pre>
+<p>Обратите внимание, что был создан новый файл <em>/etc/krb5.keytab</em>. Вот почему мы запустили бинарник <strong>kadmin.local</strong> от имени суперпользователя. Иначе мы получили бы следующую ошибку:</p>
+<pre class="sh">
+$  kadmin.local
+Authenticating as principal pablo/admin@EXAMPLE.COM with password.
+kadmin.local: Error reading password from stash: Permission denied while initializing kadmin.local interface
+</pre>
+<p>Только суперпользователь имеет доступ на чтение к файлу-тайнику (<em>/etc/krb5.d/stash.keyfile</em>).</p>
+<p>Давайте посмотрим, что записано в <em>/etc/krb5.keytab</em>:</p>
+<pre class="sh">
+#  klist -ek /etc/krb5.keytab
+Keytab name: FILE:/etc/krb5.keytab
+KVNO Principal
+---- ---------------------------------------------------------------
+   2 host/ldap-srv.example.com@EXAMPLE.COM (aes256-cts-hmac-sha1-96)
+   2 host/ldap-srv.example.com@EXAMPLE.COM (aes128-cts-hmac-sha1-96)
+   2 host/ldap-srv.example.com@EXAMPLE.COM (des3-cbc-sha1)
+   2 host/ldap-srv.example.com@EXAMPLE.COM (arcfour-hmac)
+   2 host/ldap-srv.example.com@EXAMPLE.COM (des-hmac-sha1)
+   2 host/ldap-srv.example.com@EXAMPLE.COM (des-cbc-md5)
+</pre>
+<p>Как мы можем видеть, это список ключей шифрования машины <strong>ldap-srv</strong>. Неудивительно, что доступ предоставлен только суперпользователю!</p>
+<p>У нас осталась ещё одна вещь на сервере, которую надо поправить. Это ошибка <pre class="list">mdb_equality_candidates: (krbPrincipalName) not indexed</pre> в журнале <em>/var/log/slapd.log</em>. Создадим LDIF-файл <em>9.1-kerberos.indexes.ldif</em>, который внесёт поправки в индексы:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: krbPrincipalName eq</code>
+<code>-</code>
+<code>add: olcDbIndex</code>
+<code>olcDbIndex: ou eq</code>
+</pre>
+<p>Добавим эти индексы в сервер каталогов:</p>
+<pre class="sh">#  ldapadd -QY EXTERNAL -H ldapi:/// -f 9.1-kerberos.indexes.ldif</pre>
+<p>Отлично! Теперь у нас есть настроенный KDC!</p>
+
+<h2><a name="s2"></a>9.2 Настройка клиента</h2>
+<p>С действующим KDC мы можем заставить клиентские машины и сервисы использовать его. Обозначим основные цели по настройке клиентов, чтобы интегрировать их в инфраструктуру Kerberos:</p>
+<ol>
+<li>1. Аутентификация Kerberos для <strong>sshd</strong>.</li>
+<li>2. Аутентификация OpenLDAP с помощью SASL GSSAPI.</li>
+<li>3. Применение аутентификации SASL GSSAPI для AutoFS.</li>
+</ol>
+
+<h3><a name="s2.1"></a>9.2.1 Аутентификация Kerberos для sshd</h3>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>ВНИМАНИЕ! Клиенты Kerberos должны иметь возможность подключения к TCP портам KDC с номерами 88 и 749!</p>
+<p>Установим необходимые пакеты:</p>
+<pre class="sh">#  apt-get install krb5-user libpam-krb5 libsasl2-modules-gssapi-mit</pre>
+<p>Во время установки в качестве области Kerberos можете задать EXAMPLE.COM, а в качестве серверов, обслуживающих область, <strong>ldap-srv.example.com</strong>.</p>
+<p>Отредактируйте конфигурацию клиента в файле <em>/etc/krb5.conf</em> следующим образом:</p>
+<pre class="list">
+<code>[logging]</code>
+<code> default = SYSLOG:INFO:LOCAL1</code>
+<code> kdc = SYSLOG:NOTICE:LOCAL1</code>
+<code> admin_server = SYSLOG:WARNING:LOCAL1</code>
+<code></code>
+<code>[libdefaults]</code>
+<code> default_realm = EXAMPLE.COM</code>
+<code> dns_lookup_realm = false</code>
+<code> dns_lookup_kdc = false</code>
+<code> ticket_lifetime = 24h</code>
+<code> renew_lifetime = 7d</code>
+<code> forwardable = true</code>
+<code></code>
+<code>[realms]</code>
+<code> EXAMPLE.COM = {</code>
+<code>  kdc = ldap-srv.example.com</code>
+<code>  admin_server = ldap-srv.example.com</code>
+<code>  default_domain = example.com</code>
+<code> }</code>
+<code></code>
+<code>[domain_realm]</code>
+<code> .example.com = EXAMPLE.COM</code>
+<code> example.com = EXAMPLE.COM</code>
+<code></code>
+<code>[appdefaults]</code>
+<code> pam = {</code>
+<code>  debug = false</code>
+<code>  ticket_lifetime = 36000</code>
+<code>  renew_lifetime = 36000</code>
+<code>  forwardable = true</code>
+<code>  krb4_convert = false</code>
+<code> }</code>
+</pre>
+<p>Создайте новый принципал машины для этого хоста. Мы запускаем команду <strong>kadmin</strong> от имени суперпользователя, чтобы можно было записать результирующий файл <em>/etc/krb5.keytab</em>. Иначе мы получим не очень понятную ошибку <code>No such file or directory while adding key to keytab</code>. Мы так же должны использовать модификатор <code>-p</code>, чтобы дать понять команде <strong>kadmin</strong>, от имени какого принципала мы хотим подключиться. Если мы его не зададим, то получим ошибку <code>Client not found in Kerberos database while initializing kadmin interface</code>, потому что не создавали принципал <strong>root/admin@EXAMPLE.COM</strong>. Не создавайте этот принципал! Мы хотим знать, кто подключается с правами администратора (пользователи с префиксом <strong>/admin</strong>). Если создадим&thinsp;&mdash;&thinsp;не сможем различать администраторов между собой.</p>
+<pre class="sh">
+#  kadmin -p pablo/admin@EXAMPLE.COM
+Authenticating as principal pablo/admin@EXAMPLE.COM with password.
+Password for pablo/admin@EXAMPLE.COM:
+
+kadmin:  <strong>addprinc -randkey host/ldap-client.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>ktadd host/ldap-client.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>exit</strong>
+</pre>
+<p>Эта команда создала файл <em>/etc/krb5.keytab</em>.</p>
+<p>Теперь мы можем отредактировать <em>/etc/ssh/sshd_config</em> и включить аутентификацию Kerberos. Не забудьте добавить <strong>test.group</strong> в директиву <code>AllowGroups</code>. Иначе мы не сможем протестировать конфигурацию и увидим ошибку <pre class="list">User test.user from ldap-srv.example.com not allowed because none of user's groups are listed in AllowGroups</pre> в файле <em>/var/log/auth.log</em>.</p>
+<pre class="list">
+<code>AddressFamily inet</code>
+<code>Port 22</code>
+<code>Protocol 2</code>
+<code>AllowGroups sysadmin test.group</code>
+<code>SyslogFacility AUTHPRIV</code>
+<code>LoginGraceTime 30s</code>
+<code>PermitRootLogin no</code>
+<code>StrictModes yes</code>
+<code>IgnoreRhosts yes</code>
+<code>PermitEmptyPasswords no</code>
+<code>PasswordAuthentication yes</code>
+<code>AllowTcpForwarding no</code>
+<code>X11Forwarding yes</code>
+<code>PrintLastLog yes</code>
+<code>ClientAliveInterval 120</code>
+<code>ClientAliveCountMax 2</code>
+<code>Banner /etc/issue</code>
+<code></code>
+<code>UsePAM yes</code>
+<code>ChallengeResponseAuthentication yes</code>
+<code>KerberosAuthentication yes</code>
+<code>KerberosOrLocalPasswd yes</code>
+<code>KerberosTicketCleanup yes</code>
+<code>GSSAPIAuthentication yes</code>
+<code>GSSAPICleanupCredentials yes</code>
+</pre>
+<p>Перезапустим демон:</p>
+<pre class="sh">#  service ssh restart</pre>
+<p>Запустите на клиентской рабочей станции отображение файла журнала:</p>
+<pre class="sh">#  tail -F /var/log/auth.log</pre>
+<p>А пока вернёмся на сервер.</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Создадим принципал пользователя <strong>test.user</strong>:</p>
+<pre class="sh">
+$  kadmin -p pablo/admin@EXAMPLE.COM
+Authenticating as principal pablo/admin@EXAMPLE.COM with password.
+Password for pablo/admin@EXAMPLE.COM: 
+kadmin:  <strong>addprinc test.user@EXAMPLE.COM</strong>
+WARNING: no policy specified for test.user@EXAMPLE.COM; defaulting to no policy
+Enter password for principal "test.user@EXAMPLE.COM": 
+Re-enter password for principal "test.user@EXAMPLE.COM": 
+Principal "test.user@EXAMPLE.COM" created.
+kadmin:  <strong>exit</strong>
+</pre>
+<p>Возьмём билет Kerberos у <strong>test.user</strong> и прикинемся этим пользователем. Сначалы мы уничтожим свои собственные билеты (если они есть), используя <strong>kdestroy</strong>, затем возьмём билет <strong>test.user</strong> с помощью <strong>kinit</strong>, а в итоге проверим, что он у нас есть с помощью <strong>klist</strong>:</p>
+<pre class="sh">
+$  kdestroy
+$  kinit -p test.user@EXAMPLE.COM
+Password for test.user@EXAMPLE.COM: 
+$  klist 
+Ticket cache: FILE:/tmp/krb5cc_1000
+Default principal: test.user@EXAMPLE.COM
+ 
+Valid starting       Expires              Service principal
+06.12.2014 14:58:06  07.12.2014 14:58:06  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+</pre>
+<p>Теперь попробуем авторизоваться на клиенте без пароля, используя этот билет:</p>
+<pre class="sh">$  ssh test.user@ldap-client.example.com</pre>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>В открытом нами журнале на клиенте <em>/var/log/auth.log</em> мы должны увидеть что-то подобное:</p>
+<pre class="list">
+Dec  6 15:00:55 ldap-client sshd[2170]: Authorized to test.user, krb5 principal test.user@EXAMPLE.COM (krb5_kuserok)
+Dec  6 15:00:55 ldap-client sshd[2170]: Accepted gssapi-with-mic for test.user from 192.168.122.150 port 45995 ssh2
+Dec  6 15:00:55 ldap-client sshd[2170]: pam_unix(sshd:session): session opened for user test.user by (uid=0)
+</pre>
+<p>Успех! Переходим к следующей цели.</p>
+
+<h3><a name="s2.2"></a>9.2.2 Аутентификация OpenLDAP с помощью SASL GSSAPI</h3>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Для настройки <a href="http://pro-ldap.ru/tr/admin24/sasl.html#SASL%20Authentication">аутентификаци SASL GSSAPI</a> мы должны изменить конфигурацию сервера OpenLDAP таким образом, чтобы он знал о существовании нашей области Kerberos. После этого мы можем настроить клиентов.</p>
+<p>Подключимся к KDC и создадим новый принципал. Мы по-прежнему запускаем <strong>kadmin</strong> от имени суперпользователя, потому что хотим создать новый набор ключей в файле <em>/etc/ldap/krb5.keytab</em>, чтобы наш демон <strong>slapd</strong> имел свой набор.</p>
+<pre class="sh">
+#  kadmin -p pablo/admin@EXAMPLE.COM
+kadmin:  <strong>addprinc -randkey ldap/ldap-srv.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>ktadd -k /etc/ldap/krb5.keytab ldap/ldap-srv.example.com@EXAMPLE.COM</strong>
+</pre>
+<p>Поменяем права доступа на этот файл, чтобы демон <strong>slapd</strong> смог его читать:</p>
+<pre class="sh">#  chown root:openldap /etc/ldap/krb5.keytab
+#  chmod 640 /etc/ldap/krb5.keytab
+</pre>
+<p>Создадим LDIF-файл <em>9.2.2-sasl.ldif</em> с директивами SASL:</p>
+<pre class="list">
+<code>dn: cn=config</code>
+<code>changetype: modify</code>
+<code>add: olcSaslSecProps</code>
+<code>olcSaslSecProps: noanonymous,noplain</code>
+<code>-</code>
+<code>add: olcSaslHost</code>
+<code>olcSaslHost: ldap-srv.example.com</code>
+<code>-</code>
+<code>add: olcSaslRealm</code>
+<code>olcSaslRealm: EXAMPLE.COM</code>
+</pre>
+<p>И загрузим его в базу данных службы каталогов:</p>
+<pre class="sh">#  ldapadd -QY EXTERNAL -H ldapi:/// -f 9.2.2-sasl.ldif</pre>
+<p>На самом деле нам не нужно играться с <code>olcSaslSecProps</code>, но я оставил его, потому что пытался добавить ключевое слово <code>noactive</code>. Если при этом попытаться выполнить поиск, то получим следующую ошибку:</p>
+<pre class="sh">
+#  ldapsearch -LLLY EXTERNAL -H ldapi:/// -b cn=config -s base | grep -i sasl
+SASL/EXTERNAL authentication started
+ldap_sasl_interactive_bind_s: Authentication method not supported (7)
+additional info: SASL(-4): no mechanism available: security flags do not match required
+</pre>
+<p>В данный момент такое поведение&thinsp;&mdash;&thinsp;не совсем то, что нам нужно. Может быть позже. Сейчас проверим, загрузил ли демон <strong>slapd</strong> нашу конфигурацию SASL:</p>
+<pre class="sh">
+#  ldapsearch -QLLLY EXTERNAL -H ldapi:/// -b cn=config -s base | grep -i sasl
+olcSaslSecProps: noanonymous,noplain
+olcSaslHost: ldap-srv.example.com
+olcSaslRealm: EXAMPLE.COM
+</pre>
+<p>Хорошо! Теперь нам нужно добавить параметр <code>KRB5_KTNAME</code> в файл <em>/etc/default/slapd</em>:</p>
+<pre class="list">
+<code>SLAPD_CONF=</code>
+<code>SLAPD_USER="openldap" </code>
+<code>SLAPD_GROUP="openldap"</code>
+<code>SLAPD_PIDFILE=</code>
+<code>SLAPD_SERVICES="ldap:/// ldapi:///"</code>
+<code>SLAPD_SENTINEL_FILE=/etc/ldap/noslapd</code>
+<code>SLAPD_OPTIONS="-4"</code>
+<code><strong>export KRB5_KTNAME=/etc/ldap/krb5.keytab</strong></code>
+</pre>
+<p>Для того, чтобы изменения вступили в силу, нам нужно перезапустить демон <strong>slapd</strong>:</code>
+<pre class="sh">#  service slapd restart</pre>
+<p>Демон <strong>slapd</strong> снова запущен&thinsp;&mdash;&thinsp;мы можем переходить к настройке клиента.</p>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Зайдём на клиентскую рабочую станцию по <strong>ssh</strong> от имени пользователя <strong>pablo</strong>:</p>
+<pre class="sh">$  ssh pablo/admin@ldap-client.example.com</pre>
+<p>Или даже так:</p>
+<pre class="sh">$  ssh pablo/admin@EXAMPLE.COM@ldap-client.example.com</pre>
+<p>Получим билет от KDC:</p>
+<pre class="sh">
+$  kdestroy
+$  kinit -p pablo/admin
+$  klist 
+Ticket cache: FILE:/tmp/krb5cc_1000
+Default principal: pablo@EXAMPLE.COM
+ 
+Valid starting       Expires              Service principal
+07.12.2014 14:16:24  08.12.2014 14:16:24  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+</pre>
+<p>Все настройки для доступа на сервер у нас уже внесены в файл <em>/etc/ldap/ldap.conf</em>. Проверим, можем ли мы сделать запрос к LDAP-серверу:</p>
+<pre class="sh">
+$  ldapwhoami
+ldap_sasl_interactive_bind_s: No such object (32)
+</pre>
+<p>Такая ошибка может показаться странной. Нужно указать механизм GSSAPI для доступа с помощью SASL. Такой вариант должен сработать:</p>
+<pre class="sh">
+$  ldapwhoami -Y GSSAPI
+SASL/GSSAPI authentication started
+SASL username: pablo@EXAMPLE.COM
+SASL SSF: 56
+SASL data security layer installed.
+dn:uid=pablo,cn=example.com,cn=gssapi,cn=auth
+</pre>
+<p>Супер! Добавленный модификатор мы тоже можем внести в <em>/etc/ldap/ldap.conf</em>, чтобы его не приходилось вбивать вручную каждый раз:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv.example.com</code>
+<code>TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code>TLS_CRLFILE /etc/ssl/rootca.crl</code>
+<code>TLS_REQCERT allow</code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+<code><strong>SASL_MECH GSSAPI</strong></code>
+</pre>
+<p>Вы заметили, что OpenLDAP преобразовал имя принципала Kerberos в формат DN (Distinguished Name)? У нас был принципал с таким именем:</p>
+<p><strong>pablo@EXAMPLE.COM</strong></p>
+<p>… который был преобразован <strong>slapd</strong> в это:</p>
+<p><strong>dn:uid=pablo,cn=example.com,cn=gssapi,cn=auth</strong></p>
+<p>Это значит нам нужно вернуться на сервер и задать новые правила доступа (ACL), если мы хотим, чтобы наш Kerberos-принципал AutoFS мог читать информацию для автоматического монтирования.</p>
+
+<h3><a name="s2.3"></a>9.2.3 Применение аутентификации SASL GSSAPI для autoFS</h3>
+<p>Вздохните поглубже, далее от Вас потребуется внимательность и терпение. ;)</p>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Вернёмся на наш сервер OpenLDAP и отредактируем правила доступа ACL. Но прежде чем мы продолжим, всегда неплохо проверить текущую конфигурацию. Теперь мы можем формировать запросы с использованием GSSAPI (без модификатора <code>-x</code>):</p>
+<pre class="sh">$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=config olcAccess</pre>
+<p>Запрос вернёт нам четыре DN с атрибутами <code>olcAccess</code>:</p>
+<pre class="sh">
+dn: olcDatabase={-1}frontend,cn=config
+dn: olcDatabase={0}config,cn=config
+dn: olcDatabase={1}mdb,cn=config
+dn: olcDatabase={2}monitor,cn=config
+</pre>
+<p>Мы должны изменить ACL для <code>olcDatabase={0}config</code> и <code>olcDatabase={1}mdb</code>. Приготовьтесь, ACL станут немного сложней. Создадим LDIF-файл <em>9.2.3-gssapi.acl.ldif</em> и запишем в него:</p>
+<pre class="list">
+<code>dn: olcDatabase={0}config,cn=config</code>
+<code>changetype: modify</code>
+<code>delete: olcAccess</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code>olcAccess: {0}to *</code>
+<code>  by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code></code>
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>delete: olcAccess</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code>olcAccess: {0}to *</code>
+<code>  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage</code>
+<code>  by * break</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code class="c"># Позволять принципалам Kerberos с префиксом /admin</code>
+<code class="c"># менять любые пароли.</code>
+<code>olcAccess: {1}to attrs=userPassword,userPKCS12</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by self write</code>
+<code>  by anonymous auth</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code class="c"># Позволять принципалам Kerberos с префиксом /admin</code>
+<code class="c"># записывать метку времени об изменении пароля.</code>
+<code>olcAccess: {2}to attrs=shadowLastChange</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by self write</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code class="c"># Позволять принципалам Kerberos с префиксом /admin просматривать</code>
+<code class="c"># контейнер с настройками Kerberos, но не менять его содержимое.</code>
+<code class="c"># Это правило заставит пользоваться инструментами Kerberos при администрировании области.</code>
+<code>olcAccess: {3}to dn.subtree="cn=kerberos,ou=services,dc=example,dc=com"</code>
+<code>  by dn.exact="cn=krbadmin,ou=users,dc=example,dc=com" write</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" read</code>
+<code>-</code>
+<code class="c"># Позволять принципалам Kerberos с именем autofsclient/*</code>
+<code class="c"># видеть содержимое карт автоматического монтирования.</code>
+<code>add: olcAccess</code>
+<code>olcAccess: {4}to dn.subtree="ou=autofs,ou=services,dc=example,dc=com"</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by dn.regex="uid=autofsclient/.*,cn=example.com,cn=gssapi,cn=auth" read</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code class="c"># Позволять принципалам Kerberos с префиксом /admin доступ на запись к остальному каталогу.</code>
+<code>olcAccess: {5}to *</code>
+<code>  by dn.regex="uid=.*/admin,cn=example.com,cn=gssapi,cn=auth" manage</code>
+<code>  by dn.exact="cn=krbadmin,ou=users,dc=example,dc=com" write</code>
+<code>  by self read</code>
+<code>  by dn.base="cn=nssproxy,ou=users,dc=example,dc=com" read</code>
+</pre>
+<p>Ух! Вы поняли все производимые изменения? Напоминаю, что <code>cn=admin,dc=example,dc=com</code> (<code>RootDN</code>) всегда имеет полный доступ к <code>olcDatabase={1}mdb,cn=config</code>. То же касается и <code>olcDatabase={0}config</code>. Поэтому <code>cn=admin</code> явно не упомянут в ACL. Не волнуйтесь и внимательно прочитайте правила, одно за другим. У Вас всё получится ;)</p>
+<p>Изменения масштабные, поэтому сделаем резервную копию на случай, если всё пойдёт наперекосяк:</p>
+<pre class="sh">#  tar zcvf ~/ldap/slapd.d.backup.tar.gz /etc/ldap/slapd.d</pre>
+<p>Загрузим новые ACL в конфигурацию OpenLDAP:</p>
+<pre class="sh">
+#  ldapmodify -QY EXTERNAL -H ldapi:/// -f 9.2.3-gssapi.acl.ldif
+modifying entry "olcDatabase={-1}frontend,cn=config" 
+modifying entry "olcDatabase={0}config,cn=config" 
+modifying entry "olcDatabase={1}mdb,cn=config"
+modifying entry "olcDatabase={2}monitor,cn=config"
+</pre>
+<p>Проверим, что <code>cn=admin,dc=example,dc=com</code> имеет права доступа к базе данных сервера OpenLDAP. Следующий запрос должен вернуть <code>dn: cn=config</code>:</p>
+<pre class="sh">$ ldapsearch -xLLLZWD cn=admin,dc=example,dc=com -b cn=config -s base dn</pre>
+<p>Суперпользователь с UID и GID равными нулю имеет аналогичный уровень доступа:</p>
+<pre class="sh">#  ldapsearch -LLLQY EXTERNAL -H ldapi:/// -b cn=config -s base dn</pre>
+<p>Такой же уровень доступа имеют принципалы с префиксом <strong>/admin</strong>. Получим билет принципала и выполним запрос от его имени с помощью SASL:</p>
+<pre class="sh">
+$  kdestroy
+$  kinit -p pablo/admin@EXAMPLE.COM
+$  ldapsearch -ZZLLLQb cn=config -s base dn
+dn: cn=config
+</pre>
+<p>Проверьте, работают ли права для пользователя <code>cn=nssproxy</code>. Следующая команда должна вернуть все DN из DIT кроме записей, в которых присутствует <code>cn=kerberos</code>:</p>
+<pre class="sh">$  ldapsearch -xZZLLLWD cn=nssproxy,ou=users,dc=example,dc=com -b dc=example,dc=com dn</pre>
+<p>А могут ли обычные пользователи менять свой пароль? Проверим это с клиентской рабочей станции.</p>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>Процесс обновления пароля изменился. Если мы попытаемся запустить команду <strong>passwd</strong> от имени пользователя, которого нет в локальном файле <em>/etc/passwd</em>, пароль будет изменен с использованием механизмов Kerberos:</p>
+<pre class="sh">
+$ su - test.user
+$ passwd 
+Current Kerberos password: 
+Новый пароль : 
+Повторите ввод нового пароля : 
+passwd: password updated successfully
+</pre>
+<p>Для спокойствия убедимся, что пароль поменялся в нужном месте. Сверим текущее время и время изменения пароля в принципале <strong>test.user@EXAMPLE.COM</strong>. Они должны различаться незначительно.</p>
+<p>Время изменения пароля записывается в принципалах в атрибуте <code>krbLastPwdChange</code>. Запись содержит время по Гринвичу (GMT). Поэтому для начала посмотрим текущее время GMT на клиентской машине:</p>
+<pre class="sh">
+$ date -u
+Сб. дек. 20 17:19:24 UTC 2014
+</pre>
+<p>Теперь получим билет администратора, чтобы заглянуть в атрибуты принципала <strong>test.user@EXAMPLE.COM</strong>.</p>
+<pre class="sh">
+$  kdestroy
+$  kinit -p pablo/admin@EXAMPLE.COM
+</pre>
+<p>И наконец, отправим вот такой длиннющий запрос (ответ сервера&thinsp;&mdash;&thinsp;только последняя строчка) к серверу каталогов по атрибуту <code>krbLastPwdChange</code>:</p>
+<pre class="sh">$  ldapsearch -ZZLLLQb krbPrincipalName=test.user@EXAMPLE.COM,cn=EXAMPLE.COM,cn=kerberos,ou=services,dc=example,dc=com -s base krbLastPwdChange
+
+dn: krbPrincipalName=test.user@EXAMPLE.COM,cn=EXAMPLE.COM,cn=kerberos,ou=servi ces,dc=example,dc=com
+krbLastPwdChange: 20141220171526Z
+</pre>
+<p>Как мы можем видеть, пароль принципала <strong>test.user@EXAMPLE.COM</strong> был изменён четыре минуты назад (буква <code>Z</code> указывает на время по Гринвичу). Замечательно!</p>
+<p>Теперь мы можем настроить клиентскую машину для использования механизма GSSAPI в работе с картами автомонтирования AutoFS. На этом этапе Вы должны быть авторизованы на клиентской машине от имени пользователя, <strong>домашний каталог которого не лежит на сервере NFS!</strong> Если это не так, авторизуйтесь повторно.</p>
+<p>Перед тем как продолжить, проверьте, отмонтированы ли все каталоги NFS:</p>
+<pre class="sh">$  df -h</pre>
+<p>Проверьте общесистемную конфигурацию AutoFS в файле <em>/etc/defaults/autofs</em>:</p>
+<pre class="list">
+<code>TIMEOUT=300</code>
+<code>BROWSE_MODE="no"</code>
+<code>MOUNT_NFS_DEFAULT_PROTOCOL=4</code>
+<code>LOGGING="debug"</code>
+<code>OPTIONS="-d -v"</code>
+<code>LDAP_URI="ldap://ldap-srv.example.com"</code>
+<code>SEARCH_BASE="ou=autofs,ou=services,dc=example,dc=com"</code>
+<code>MAP_OBJECT_CLASS="automountMap"</code>
+<code>ENTRY_OBJECT_CLASS="automount"</code>
+<code>MAP_ATTRIBUTE="ou"</code>
+<code>ENTRY_ATTRIBUTE="cn"</code>
+<code>VALUE_ATTRIBUTE="automountInformation"</code>
+<code>USE_MISC_DEVICE="yes"</code>
+</pre>
+<p>Заметьте, что атрибут <code>LOGGING</code> установлен в значение <code>debug</code>, а <code>OPTIONS</code>&thinsp;&mdash;&thinsp;в <code>-d -v</code>. Это для того, чтобы помочь нам с поиском проблем, если они возникнут. В рабочей конфигурации этот параметр должен быть изменён. Мы вернёмся к этому через пару минут.</p>
+<p>Далее нам нужно создать принципал Kerberos для демона <strong>autofs</strong>. Мы так же должны добавить ключи этого нового принципала в набор ключей нашего клиента.</p>
+<pre class="sh">
+#  kadmin -p pablo/admin@EXAMPLE.COM
+kadmin:  <strong>addprinc -randkey autofsclient/ldap-client.example.com@EXAMPLE.COM</strong>
+kadmin:  <strong>ktadd autofsclient/ldap-client.example.com@EXAMPLE.COM</strong>
+</pre>
+<p>Как мы можем видеть, ключи <strong>autofsclient</strong> теперь являются частью набора ключей клиента:</p>
+<pre class="sh">
+#  klist -ek /etc/krb5.keytab
+Keytab name: FILE:/etc/krb5.keytab
+KVNO Principal
+---- --------------------------------------------------------------------------
+   2 host/ldap-client.example.com@EXAMPLE.COM (aes256-cts-hmac-sha1-96)
+   2 host/ldap-client.example.com@EXAMPLE.COM (aes128-cts-hmac-sha1-96)
+   2 host/ldap-client.example.com@EXAMPLE.COM (des3-cbc-sha1)
+   2 host/ldap-client.example.com@EXAMPLE.COM (arcfour-hmac)
+   2 host/ldap-client.example.com@EXAMPLE.COM (des-hmac-sha1)
+   2 host/ldap-client.example.com@EXAMPLE.COM (des-cbc-md5)
+   2 autofsclient/ldap-client.example.com@EXAMPLE.COM (aes256-cts-hmac-sha1-96)
+   2 autofsclient/ldap-client.example.com@EXAMPLE.COM (aes128-cts-hmac-sha1-96)
+   2 autofsclient/ldap-client.example.com@EXAMPLE.COM (des3-cbc-sha1)
+   2 autofsclient/ldap-client.example.com@EXAMPLE.COM (arcfour-hmac)
+   2 autofsclient/ldap-client.example.com@EXAMPLE.COM (des-hmac-sha1)
+   2 autofsclient/ldap-client.example.com@EXAMPLE.COM (des-cbc-md5)
+</pre>
+<p>Теперь мы можем изменить порядок аутентификации <strong>autofs</strong> в файле <em>/etc/autofs_ldap_auth.conf</em>, используя механизм GSSAPI и новый принципал:</p>
+<pre class="list">
+<code>&lt;?xml version="1.0" ?&gt;</code>
+<code> &lt;autofs_ldap_sasl_conf</code>
+<code>  usetls="yes"</code>
+<code>  tlsrequired="yes"</code>
+<code>  authrequired="yes"</code>
+<code>  authtype="GSSAPI"</code>
+<code>  clientprinc="autofsclient/ldap-client.example.com@EXAMPLE.COM"</code>
+<code>/&gt;</code>
+<code class="c">&lt;!-- EOF --&gt;</code>
+</pre>
+<p>Перезапустим демон autofs:</p>
+<pre class="sh">#  service autofs restart</pre>
+<p>Проверим журнал <em>/var/log/syslog</em>, всё ли работает?</p>
+<pre class="list">
+...
+Dec 20 22:12:27 ldap-client automount[943]: Starting automounter version 5.0.7, master map auto.master 
+Dec 20 22:12:27 ldap-client automount[943]: using kernel protocol version 5.02 
+Dec 20 22:12:27 ldap-client automount[943]: lookup_nss_read_master: reading master ldap auto.master 
+Dec 20 22:12:28 ldap-client kernel: [    4.116950] e1000: eth0 NIC Link is Up 1000 Mbps Full Duplex, Flow Control: RX 
+Dec 20 22:12:28 ldap-client kernel: [    4.118253] IPv6: ADDRCONF(NETDEV_CHANGE): eth0: link becomes ready 
+Dec 20 22:12:28 ldap-client nslcd[972]: version 0.8.13 starting 
+Dec 20 22:12:28 ldap-client nslcd[972]: accepting connections 
+Dec 20 22:12:28 ldap-client automount[943]: master_do_mount: mounting /nfs 
+Dec 20 22:12:28 ldap-client automount[943]: automount_path_to_fifo: fifo name /var/run/autofs.fifo-nfs 
+Dec 20 22:12:28 ldap-client automount[943]: lookup_nss_read_map: reading map ldap ldap:ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com 
+Dec 20 22:12:28 ldap-client automount[943]: mounted indirect on /nfs with timeout 300, freq 75 seconds 
+Dec 20 22:12:28 ldap-client automount[943]: st_ready: st_ready(): state = 0 path /nfs
+...
+</pre>
+<p>Отлично! Попробуем перейти в каталог <em>/nfs/home</em>:</p>
+<pre class="sh">
+$  cd /nfs/home
+$  pwd
+/nfs/home
+</pre>
+<p>Супер! Изменим атрибуты <code>LOGGING</code> и <code>OPTIONS</code> в файле <em>/etc/defaults/autofs</em> на повседневные:</p>
+<pre class="list">
+...
+LOGGING="none" 
+<span class="c"># OPTIONS="-d -v"</span>
+...
+</pre>
+<p>И перезапустим демон <strong>autofs</strong>:</p>
+<pre class="sh">#  service autofs restart</pre>
+<p>Вот и всё! На этом фокусы с Kerberos закончились. :)</p>
+<p>В <a href="backup.html">следующем разделе</a> мы опишем, как создавать <a href="http://pro-ldap.ru/tr/admin24/maintenance.html">резервную копию</a> сервера OpenLDAP и восстанавливаться из неё. Затем мы настроим <a href="http://pro-ldap.ru/tr/admin24/replication.html">репликацию</a>. Принимая во внимание зависимость наших клиентов от сервера OpenLDAP, нам надо обеспечить некоторый уровень отказоустойчивости.</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Kerberos KDC с использованием OpenLDAP в качестве бэкэнда и аутентификацией SASL GSSAPI</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

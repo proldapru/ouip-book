@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Введение - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Введение</p>
+
+<h1>Введение</h1>
+<p>Это руководство является вольным переводом. Исходная конфигурация для <strong>CentOS 6.2</strong> адаптирована под <strong>Ubuntu 14.04 server</strong>. Выражаю благодарность автору оригинала и привожу ссылку:</p>
+<p><a href="http://itdavid.blogspot.ca/2012/05/howto-centos-6.html">Another IT blog: «HOWTO: CentOS 6.2 OpenLDAP 2.4 Setup»</a> (EN)</p>
+<p>В процессе написания использовались материалы проекта <strong>pro-ldap.ru</strong>. В том числе:</p>
+<p><a href="http://pro-ldap.ru/books/diving/">Погружение в OpenLDAP (RU)</a></p>
+<p>Несколько весьма полезных ссылок для понимания сути описанного далее:</p>
+<p><a href="http://www.openldap.org/doc/admin24/">OpenLDAP Software 2.4 Administrator's Guide</a> (EN)</p>
+<p><a href="http://pro-ldap.ru/tr/admin24/">Руководство администратора OpenLDAP 2.4</a> (RU)</p>
+<p><a href="http://pro-ldap.ru/tr/zytrax/">LDAP для учёных-ракетчиков</a> (RU)</p>
+<p>Конфигурация используемых в нашем стенде машин:</p>
+<p>На всех машинах при установке ОС заводится пользовательская учётная запись <strong>user</strong>.</p>
+<table>
+<tr><td><strong>Шлюз</strong></td><td>192.168.122.1</td></tr>
+<tr><td colspan="2"><strong>Сервер DNS</strong></td></tr>
+<tr><td>hostname:</td><td>dns-srv.example.com</td></tr>
+<tr><td>ip:</td><td>192.168.122.140</td></tr>
+<tr><td colspan="2"><strong>Сервер каталогов и сервер Kerberos</strong></td></tr>
+<tr><td>hostname:</td><td>ldap-srv.example.com</td></tr>
+<tr><td>ip:</td><td>192.168.122.150</td></tr>
+<tr><td colspan="2"><strong>Клиентская машина</strong></td></tr>
+<tr><td>hostname:</td><td>ldap-client.example.com</td></tr>
+<tr><td>ip:</td><td>192.168.122.151</td></tr>
+<tr><td colspan="2"><strong>Сервер NFS</strong></td></tr>
+<tr><td>hostname:</td><td>nfs-srv.example.com</td></tr>
+<tr><td>ip:</td><td>192.168.122.154</td></tr>
+<tr><td colspan="2"><strong>Сервер репликации</strong></td></tr>
+<tr><td>hostname:</td><td>ldap-srv-repl.example.com</td></tr>
+<tr><td>ip:</td><td>192.168.122.160</td></tr>
+</table>
+<p>Начните с установки Ubuntu 14.04. Это довольно просто. Для этого примера я использовал  виртуальные машины. Постарайтесь воздержаться от установки большого количества пакетов. Такой подход уменьшит количество обновляемых пакетов, а так же сузит перечень возможных атак на Ваши серверы. После первоначальной установки каждой виртуальной машины обновите программное обеспечение командой:</p>
+<pre class="sh">#  apt-get update &amp;&amp; apt-get upgrade</pre>
+<p>Для тех, кто не в курсе... В тексте обращайте внимание на символы <code>#</code> и <code>$</code>. Идущие после них команды выполняются от имени пользователя <strong>root</strong> и обычного пользователя соответственно. Выбор за Вами, открывать отдельный терминал с правами суперпользователя или предварять команды командой <code>sudo</code> в терминале обычного пользователя.</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Введение</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Управление пользователями и группами - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Управление пользователями и группами в OpenLDAP</p>
+
+<h1>4. Управление пользователями и группами в OpenLDAP</h1>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>На данном этапе у нас есть пустой каталог OpenLDAP. Мы можем проверить это, просто попытавшись извлечь из него информацию:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b dc=example,dc=com
+Enter LDAP Password:
+No such object (32)
+</pre>
+<p>Если Вам интересно, коды ошибок LDAP описаны в <a href="http://pro-ldap.ru/tr/rfc/rfc4511.html#appendix-A">RFC 4511</a>, в приложении A «Результирующие коды LDAP». В случае ошибки <strong>32</strong> сервер информирует нас, что запрашиваемый объект <code>dc=example,dc=com</code> не найден. Но такую же ошибку можно получить, если ACL сервера запрещают доступ.</p>
+<p>Для работы нашего каталога понадобится создать корневой суффикс базы данных и добавить в него две организационных единицы (<a href="http://pro-ldap.ru/tr/zytrax/apd/index.html#ou">Organizational Unit, OU</a>) для хранения пользователей и групп. Создадим LDIF-файл <em>4-users+groups.ldif</em>, в котором опишем эту информацию:</p>
+<pre class="list">
+<code>dn: dc=example,dc=com</code>
+<code>dc: example</code>
+<code>objectClass: top</code>
+<code>objectClass: domain</code>
+<code></code>
+<code>dn: ou=users,dc=example,dc=com</code>
+<code>ou: Users</code>
+<code>objectClass: top</code>
+<code>objectClass: organizationalUnit</code>
+<code>description: Central location for UNIX users</code>
+<code></code>
+<code>dn: ou=groups,dc=example,dc=com</code>
+<code>ou: Groups</code>
+<code>objectClass: top</code>
+<code>objectClass: organizationalUnit</code>
+<code>description: Central location for UNIX groups</code>
+</pre>
+<p>Добавим эту информацию в наш каталог:</p>
+<pre class="sh">
+$  ldapmodify -a -xZZWD cn=admin,dc=example,dc=com -f 4-users+groups.ldif
+Enter LDAP Password:
+adding new entry "dc=example,dc=com"
+adding new entry "ou=users,dc=example,dc=com"
+adding new entry "ou=groups,dc=example,dc=com"
+</pre>
+<p>Можем удостовериться в том, что информация добавлена:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com
+Enter LDAP Password:
+dn: dc=example,dc=com
+dc: example
+objectClass: top
+objectClass: domain
+
+dn: ou=users,dc=example,dc=com
+ou: Users
+objectClass: top
+objectClass: organizationalUnit
+description: Central location for UNIX users
+
+dn: ou=groups,dc=example,dc=com
+ou: Groups
+objectClass: top
+objectClass: organizationalUnit
+description: Central location for UNIX groups
+</pre>
+<p>Теперь давайте добавим несколько групп:</p>
+<ul>
+<li><strong>sysadmin</strong>, для объединения системных администраторов Linux;</li>
+<li><strong>nssproxy</strong>, которая будет использоваться для опроса сервера, чтобы не делать анонимный опрос;</li>
+<li><strong>test.group</strong>, для тестирования различных частей архитектуры PAM и LDAP. Тестирование&thinsp;&mdash;&thinsp;это всегда хорошо!</li>
+</ul>
+<p>Этот список не окончательный и может быть дополнен, чтобы соответствовать нуждам Вашей организации.</p>
+<p>Для добавления групп в каталог создадим новый LDIF, <em>4-groups.ldif</em>:</code>
+<pre class="list">
+<code>dn: cn=sysadmin,ou=groups,dc=example,dc=com</code>
+<code>cn: sysadmin</code>
+<code>objectClass: top</code>
+<code>objectClass: posixGroup</code>
+<code>gidNumber: 1100</code>
+<code>description: UNIX systems administrators</code>
+<code></code>
+<code>dn: cn=nssproxy,ou=groups,dc=example,dc=com</code>
+<code>cn: nssproxy</code>
+<code>objectClass: top</code>
+<code>objectClass: posixGroup</code>
+<code>gidNumber: 801</code>
+<code>description: Network Service Switch Proxy</code>
+<code></code>
+<code>dn: cn=test.group,ou=groups,dc=example,dc=com</code>
+<code>cn: test.group</code>
+<code>objectClass: top</code>
+<code>objectClass: posixGroup</code>
+<code>gidNumber: 1101</code>
+<code>description: Test Group</code>
+</pre>
+<p>Загрузим LDIF в наш каталог:</p>
+<pre class="sh">
+$  ldapmodify -a -xZZWD cn=admin,dc=example,dc=com -f 4-groups.ldif
+Enter LDAP Password:
+adding new entry "cn=sysadmin,ou=groups,dc=example,dc=com"
+adding new entry "cn=nssproxy,ou=groups,dc=example,dc=com"
+adding new entry "cn=test.group,ou=groups,dc=example,dc=com"
+</pre>
+<p>Настало время создать несколько пользователей. И вновь отмечаем, что список может быть расширен в соответствии с потребностями Вашей организации:</p>
+<ul>
+<li><strong>pablo</strong>. Это я ;)</li>
+<li><strong>nssproxy</strong>, который будет использоваться для опроса сервера, чтобы не делать опрос от анонимного пользователя.</li>
+<li><strong>test.user</strong>. Как и тестовая группа, этот пользователь будет использоваться для проверки наших настроек.</li>
+</ul>
+<p>Создадим LDIF-файл <em>4-users.ldif</em> для добавления пользователей. Пока не беспокойтесь о паролях, мы сейчас к ним вернёмся:</p>
+<pre class="list">
+<code>dn: cn=pablo,ou=users,dc=example,dc=com</code>
+<code>uid: pablo</code>
+<code>gecos: Pablo Sdoba</code>
+<code>objectClass: top</code>
+<code>objectClass: account</code>
+<code>objectClass: posixAccount</code>
+<code>objectClass: shadowAccount</code>
+<code>userPassword: {SSHA}RsAMqOI3647qg1gAZF3x2BKBnp0sEVfa</code>
+<code>shadowLastChange: 15140</code>
+<code>shadowMin: 0</code>
+<code>shadowMax: 99999</code>
+<code>shadowWarning: 7</code>
+<code>loginShell: /bin/bash</code>
+<code>uidNumber: 1100</code>
+<code>gidNumber: 1100</code>
+<code>homeDirectory: /home/pablo</code>
+<code></code>
+<code>dn: cn=nssproxy,ou=users,dc=example,dc=com</code>
+<code>uid: nssproxy</code>
+<code>gecos: Network Service Switch Proxy User</code>
+<code>objectClass: top</code>
+<code>objectClass: account</code>
+<code>objectClass: posixAccount</code>
+<code>objectClass: shadowAccount</code>
+<code>userPassword: {SSHA}RsAMqOI3647qg1gAZF3x2BKBnp0sEVfa</code>
+<code>shadowLastChange: 15140</code>
+<code>shadowMin: 0</code>
+<code>shadowMax: 99999</code>
+<code>shadowWarning: 7</code>
+<code>loginShell: /bin/false</code>
+<code>uidNumber: 801</code>
+<code>gidNumber: 801</code>
+<code>homeDirectory: /home/nssproxy</code>
+<code></code>
+<code>dn: cn=test.user,ou=users,dc=example,dc=com</code>
+<code>uid: test.user</code>
+<code>gecos: Test User</code>
+<code>objectClass: top</code>
+<code>objectClass: account</code>
+<code>objectClass: posixAccount</code>
+<code>objectClass: shadowAccount</code>
+<code>userPassword: {SSHA}RsAMqOI3647qg1gAZF3x2BKBnp0sEVfa</code>
+<code>shadowLastChange: 15140</code>
+<code>shadowMin: 0</code>
+<code>shadowMax: 99999</code>
+<code>shadowWarning: 7</code>
+<code>loginShell: /bin/bash</code>
+<code>uidNumber: 1101</code>
+<code>gidNumber: 1101</code>
+<code>homeDirectory: /home/test.user</code>
+</pre>
+<p>Пользователи связаны с группами через атрибут <code>gidNumber</code>. Для того, чтобы добавить в группу других пользователей, в запись группы необходимо добавить атрибут <code>memberUID</code>, перечислив в нём UID пользователей через запятую. Например, это может выглядеть вот так:</p>
+<pre class="list">
+<code>dn: cn=sysadmin,ou=groups,dc=example,dc=com</code>
+<code>cn: sysadmin</code>
+<code>objectClass: top</code>
+<code>objectClass: posixGroup</code>
+<code>gidNumber: 1100</code>
+<code>description: UNIX systems administrators</code>
+<code>memberUID: 801,1101</code>
+</pre>
+<p>Добавьте пользователей в каталог:</p>
+<pre class="sh">
+$  ldapmodify -a -xZZWD cn=admin,dc=example,dc=com -f 4-users.ldif
+Enter LDAP Password:
+adding new entry "cn=pablo,ou=users,dc=example,dc=com"
+adding new entry "cn=nssproxy,ou=users,dc=example,dc=com"
+adding new entry "cn=test.user,ou=users,dc=example,dc=com"
+</pre>
+<p>Теперь установим пароли для пользователей. Повторите нижеследующую команду для всех пользователей. Обратите внимание, что сначала Вам будет предложено дважды ввести пароль изменяемой записи, а затем&thinsp;&mdash;&thinsp;пароль записи <code>cn=admin,dc=example,dc=com</code>:</p>
+<pre class="sh">
+$  ldappasswd -xZZWD cn=admin,dc=example,dc=com -S cn=nssproxy,ou=users,dc=example,dc=com
+New password:
+Re-enter new password:
+Enter LDAP Password:
+</pre>
+<p>Если заглянуть в журнал <em>/var/log/slapd.log</em>, то можно увидеть строки, говорящие об изменении записи:</p>
+<pre class="list">
+slapd[5319]: conn=1022 op=1 PASSMOD id="cn=nssproxy,ou=users,dc=example,dc=com" new
+slapd[5319]: conn=1022 op=1 RESULT oid= err=0 text=
+</pre>
+<p>Для того, чтобы пользователь <strong>nssproxy</strong> имел доступ к информации нашего каталога, необходимо поправить ACL базы данных с пользователями и группами. Но какое у этой базы DN? Давайте вспомним:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=config dn | grep -i database
+Enter LDAP Password:
+dn: olcDatabase={-1}frontend,cn=config
+dn: olcDatabase={0}config,cn=config
+dn: olcDatabase={1}mdb,cn=config
+dn: olcDatabase={2}monitor,cn=config
+</pre>
+<p>В разделе 2.6 мы дали нашей учетной записи администратора очень широкие права, поэтому он может заглянуть в конфигурацию <code>cn=config</code>.</p>
+<p>Теперь мы знаем, что требуется отредактировать ACL записи <code>olcDatabase={1}mdb,cn=config</code>.</p>
+<p>Давайте проверим, какие ACL настроены для данного DN (вывод отформатирован):</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b olcDatabase={1}mdb,cn=config olcAccess
+Enter LDAP Password:
+dn: olcDatabase={1}mdb,cn=config
+olcAccess: {0}to *
+  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external ,cn=auth" manage
+  by * break
+olcAccess: {1}to attrs=userPassword
+  by self write
+  by anonymous auth
+olcAccess: {2}to *
+  by self read
+</pre>
+<p>Мы должны немного изменить ACL, чтобы предоставить доступ пользователю <strong>nssproxy</strong> на чтение атрибутов учётных записей. Для этого создадим LDIF-файл <em>4-nssproxy.acl.ldif</em>:</p>
+<pre class="list">
+<code>dn: olcDatabase={1}mdb,cn=config</code>
+<code>changetype: modify</code>
+<code>replace: olcAccess</code>
+<code>olcAccess: {0}to *</code>
+<code>  by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external ,cn=auth" manage</code>
+<code>  by * break</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code>olcAccess: {1}to attrs=userPassword</code>
+<code>  by self write</code>
+<code>  by anonymous auth</code>
+<code>-</code>
+<code>add: olcAccess</code>
+<code>olcAccess: {2}to *</code>
+<code>  by self read</code>
+<code>  by dn.base="cn=nssproxy,ou=users,dc=example,dc=com" read</code>
+</pre>
+<p>Загрузим LDIF с изменениями:</p>
+<pre class="sh">
+$  ldapmodify -xZZWD cn=admin,dc=example,dc=com -f 4-nssproxy.acl.ldif
+Enter LDAP Password:
+modifying entry "olcDatabase={1}mdb,cn=config"
+</pre>
+<p>Проверим, можем ли мы просматривать информацию в каталоге от имени пользователя <strong>nssproxy</strong>. Для этого выполним запрос с использованием его учётных данных. Результатом запроса должно быть всё DIT (Directory Information Tree). Опустим его, для краткости:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=nssproxy,ou=users,dc=example,dc=com "(objectClass=*)"
+Enter LDAP Password:
+dn: dc=example,dc=com
+...
+</pre>
+<p>Убедитесь, что другие учётные записи пользователей не имеют доступа к DIT:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=pablo,ou=users,dc=example,dc=com "(objectClass=*)"
+Enter LDAP Password:
+No such object (32)
+</pre>
+<h3>LDAP-браузер</h3>
+<p>База данных нашего сервера каталогов по-немногу заполняется объектами. С этого момента стоит подумать о выборе LDAP-браузера. Как правило, это приложение, которое позволяет наглядно отображать записи в базе данных и работать с ними. Лично у меня самый любимый&thinsp;&mdash;&thinsp;<a href="http://www.lichteblau.com/ldapvi/">ldapvi</a>. Но он консольный и имеет объективные недостатки. Попробуйте <a href="https://directory.apache.org/studio/">Apache Directory Studio</a>. Он имеет нормальный GUI, бесплатен и поддерживает множество удобных функций для управления сервером каталогов. Этот браузер может быть установлен как отдельно, так и в качестве компонента программного средства Eclipse. Должен предупредить, при использовании Apache Directory Studio у меня возникали проблемы с доступом к серверу каталогов. Единственно разумное объяснение, которое я нашёл&thinsp;&mdash;&thinsp;ориентированность этого программного средства на использование с Apache Directory Server (<a href="https://directory.apache.org/apacheds/news.html">ApacheDS</a>). Так же неплохой вариант для работы из Windows&thinsp;&mdash;&thinsp;<a href="http://www.ldapadmin.org/">LDAP Admin</a>.</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > Управление пользователями и группами в OpenLDAP</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>

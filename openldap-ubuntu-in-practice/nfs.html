@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<title>Хранилище карт автоматического монтирования для autofs - OpenLDAP и Ubuntu на практике</title>
+<link rel="stylesheet" href="pro-ldap.css" type="text/css">
+<script src="/pro-ldap.js"></script>
+</head>
+<body>
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > OpenLDAP как хранилище карт автоматического монтирования для autofs</p>
+
+<h1>7. OpenLDAP как хранилище карт автоматического монтирования для autofs</h1>
+<p>В этом разделе мы разберёмся, как настроить сервер NFS. Клиент NFS (<strong>ldap-client</strong>) будет монтировать ресурсы сервера с помощью <strong>autofs</strong> версии 5. При этом карты автоматического монтирования будут располагаться на сервере OpenLDAP (<strong>ldap-srv</strong>). Мы так же создадим центральный NFS репозиторий для программного обеспечения.</p>
+
+<h2><a name="s1"></a>7.1 Создание сервера NFS</h2>
+<p>Развернём NFS-сервер по аналогии с первым разделом. Для начала обновим информацию на DNS сервере (в нашем случае&thinsp;&mdash;&thinsp;в файле <em>/etc/hosts</em>):</p>
+<p class="place">Где работаем: <strong>dns-srv</strong></p>
+<pre class="list">
+<code>127.0.0.1        localhost</code>
+<code>192.168.122.140  dns-srv.example.com</code>
+<code></code>
+<code>192.168.122.150  ldap-srv.example.com</code>
+<code>192.168.122.151  ldap-client.example.com</code>
+<code>192.168.122.154  nfs-srv.example.com</code>
+</pre>
+<p>И перезапустим демон DNS, чтобы изменения вступили в силу:</p>
+<pre class="sh">#  service dnsmasq restart</pre>
+<p>Теперь настроим наш NFS-сервер.</p>
+<p class="place">Где работаем: <strong>nfs-srv</strong></p>
+<p>Настроим сеть в файле <em>/etc/network/interfaces</em>:</p>
+<pre class="list">
+<code>auto lo</code>
+<code>iface lo inet loopback</code>
+<code></code>
+<code>auto eth0</code>
+<code>iface eth0 inet static</code>
+<code>        address 192.168.122.154</code>
+<code>        netmask 255.255.255.0</code>
+<code>        gateway 192.168.122.1</code>
+<code>        dns-nameservers 192.168.122.140</code>
+</pre>
+<p>Настроим имя NFS-сервера. В Ubuntu 14.04 останов или перезапуск сервиса <strong>networking</strong> не поддерживается, поэтому придётся сделать так:</p>
+<pre class="sh">
+#  echo 'nfs-srv.example.com' &gt; /etc/hostname
+#  reboot
+</pre>
+<p>Проверим разрешение имени будущего сервера LDAP:</p>
+<pre class="sh">
+$  dig nfs-srv.example.com +short
+192.168.122.150
+</pre>
+<p>Проверим обратное разрешение имени:</p>
+<pre class="sh">
+$  dig -x `dig nfs-srv.example.com +short` +short
+nfs-srv.example.com.
+</pre>
+
+<h2><a name="s2"></a>7.2 Интеграция сервера NFS с сервером каталогов</h2>
+<p class="place">Где работаем: <strong>nfs-srv</strong></p>
+<p>Установим необходимые пакеты:</p>
+<pre class="sh">#  passwd
+Введите новый пароль UNIX:
+Повторите ввод нового пароля UNIX:
+passwd: password updated successfully
+#  apt-get install nfs-common nfs-kernel-server nfs4-acl-tools libnss-ldapd libpam-ldapd sudo-ldap
+</pre>
+<p>Заменим ссылку <em>/etc/sudo-ldap.conf</em> на пустой файл:</p>
+<pre class="sh">
+#  rm /etc/sudo-ldap.conf
+#  touch /etc/sudo-ldap.conf
+</pre>
+<p>Так как наши пользовательские учётные записи хранятся на сервере OpenLDAP, NFS-сервер тоже должен быть LDAP-клиентом. Произведём их интеграцию. Для этого надо внести изменения в четыре конфигурационных файла и произвести ряд нехитрых манипуляций.</p>
+<p>Конфигурация LDAP-клиента в <em>/etc/ldap/ldap.conf</em>:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv.example.com</code>
+<code>TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code>TLS_REQCERT demand</code>
+<code>TLS_CRLFILE /etc/ssl/rootca.crl</code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+</pre>
+<p>Конфигурация LDAP для <strong>sudo</strong> в <em>/etc/sudo-ldap.conf</em>:</p>
+<pre class="list">
+<code>BASE  dc=example,dc=com</code>
+<code>URI  ldap://ldap-srv.example.com</code>
+<code>TLS_CACERT /etc/ssl/certs/rootca.crt</code>
+<code>TLS_REQCERT demand</code>
+<code>TLS_CRLFILE /etc/ssl/rootca.crl</code>
+<code>BINDDN  cn=nssproxy,ou=users,dc=example,dc=com</code>
+<code>BINDPW  пароль.пользователя.nssproxy</code>
+<code>SUDOERS_BASE    ou=sudo,ou=services,dc=example,dc=com</code>
+<code>TIMELIMIT 15</code>
+<code>TIMEOUT  20</code>
+</pre>
+<p>Конфигурация локальной службы имён LDAP в <em>/etc/nslcd.conf</em>:</p>
+<pre class="list">
+<code>uid nslcd</code>
+<code>gid nslcd</code>
+<code>uri ldap://ldap-srv.example.com</code>
+<code>base dc=example,dc=com</code>
+<code>binddn cn=nssproxy,ou=users,dc=example,dc=com</code>
+<code>bindpw пароль.пользователя.nssproxy</code>
+<code>rootpwmoddn cn=admin,dc=example,dc=com</code>
+<code>base group ou=groups,dc=example,dc=com</code>
+<code>base passwd ou=users,dc=example,dc=com</code>
+<code>base shadow ou=users,dc=example,dc=com</code>
+<code>bind_timelimit 5</code>
+<code>timelimit 10</code>
+<code>idle_timelimit 60</code>
+<code>ssl start_tls</code>
+<code>tls_reqcert never</code>
+<code>tls_cacertfile /etc/ssl/certs/rootca.crt</code>
+<code>nss_initgroups_ignoreusers bin,daemon,games,lp,mail,nobody,nslcd,root,sshd,sync,uucp</code>
+<code>nss_initgroups_ignoreusers sys,man,news,proxy,www-data,backup,list,irc,gnats,landscape</code>
+</pre>
+<p>Конфигурация Name Service Switch (NSS) в <em>/etc/nsswitch.conf</em>:</p>
+<pre class="list">
+<code>passwd:         compat ldap</code>
+<code>group:          compat ldap</code>
+<code>shadow:         compat ldap</code>
+<code></code>
+<code>hosts:          files dns</code>
+<code>networks:       files</code>
+<code></code>
+<code>protocols:      db files</code>
+<code>services:       db files</code>
+<code>ethers:         db files</code>
+<code>rpc:            db files</code>
+<code></code>
+<code>netgroup:       nis ldap</code>
+<code>sudoers:        files ldap</code>
+</pre>
+<p>Скопируем сертификат нашего удостоверяющего центра и CRL на NFS-сервер. Подставим вместо <strong>user</strong> имя Вашей пользовательской учётной записи на <strong>ldap-srv</strong>:</p>
+<pre class="sh">
+#  scp user@ldap-srv.example.com:/etc/ssl/certs/rootca.crt /etc/ssl/certs/
+#  scp user@ldap-srv.example.com:/etc/ssl/rootca.crl /etc/ssl/
+</pre>
+<p>Завершая интеграцию с LDAP-сервером, поменяем права доступа к <em>/etc/nslcd.conf</em> и <em>/etc/sudo-ldap.conf</em>, потому что теперь в них хранится информация для аутентификации. Затем перезапустим сервисы <strong>nslcd</strong> и <strong>nscd</strong>:</p>
+<pre class="sh">
+#  chmod 600 /etc/{nslcd.conf,sudo-ldap.conf}
+#  chown root:root /etc/sudo-ldap.conf
+#  chown nslcd:nslcd /etc/nslcd.conf
+#  service nslcd restart
+ * Restarting LDAP connection daemon nslcd                                [ OK ]
+#  service nscd restart
+ * Restarting LDAP connection daemon nscd                                 [ OK ]
+</pre>
+<p>Теперь удостоверимся, что пользователя <strong>test.user</strong> нет в локальной конфигурации в <em>/etc/passwd</em>:</p>
+<pre class="sh">
+$  grep ^test.user /etc/passwd || echo No such user
+No such user
+</pre>
+<p>А теперь проверим, что мы можем получить информацию об этом пользователе от нашего сервера каталогов. Напоминаю, что данные <strong>shadow</strong> можно получить только выполнив <strong>getent</strong> от имени суперпользователя (UID=0):</p>
+<pre class="sh">
+$  getent passwd test.user
+test.user:x:1101:1101:Test User:/home/test.user:/bin/bash
+$  getent group test.group
+test.group:*:1101:
+#  getent shadow test.user
+test.user:*:15140:0:99999:7:::0
+</pre>
+<p>Можем переходить к настройке сетевых ресурсов.</p>
+
+<h2><a name="s3"></a>7.3 Настройка сетевых ресурсов NFS-сервера</h2>
+<p class="place">Где работаем: <strong>nfs-srv</strong></p>
+<p>Создайте каталоги, в которых будут находиться пользовательские домашние каталоги (<em>/export/home</em>) и центральный репозиторий программного обеспечения (<em>/export/install</em>):</p>
+<pre class="sh">#  mkdir -p /export/home /export/install</pre>
+<p>Держите в уме, что нам необходим домашний каталог для каждого пользователя. </p>
+<p>Теперь можем создать тестовый пример. Для этих целей у нас и есть учётная запись <strong>test.user</strong>:</p>
+<pre class="sh">
+#  mkdir /export/home/test.user
+#  cp /etc/skel/.* /export/home/test.user
+#  chown -R test.user:test.group /export/home/test.user
+</pre>
+<p>Если забыли пароль учётной записи <strong>test.user</strong>, теперь можем его поменять:</p>
+<pre class="sh">$  ldappasswd -xZZWD cn=admin,dc=example,dc=com -S cn=test.user,ou=users,dc=example,dc=com</pre>
+<p>Укажем экспортируемые каталоги в <em>/etc/exports</em>:</p>
+<pre class="sh">
+/export/home    *.example.com(rw,no_subtree_check)
+/export/install *.example.com(rw,no_subtree_check)
+</pre>
+<p>Перезапустим демон NFS:</p>
+<pre class="sh">#  service nfs-kernel-server restart</pre>
+<p>И проверим работоспособность:</p>
+<pre class="sh">
+$  showmount -e
+Export list for nfs-srv.example.com:
+/export/install *.example.com
+/export/home    *.example.com
+</pre>
+<p>Каталоги успешно экспортируются. С помощью сервера OpenLDAP мы будем централизованно управлять тем, что и куда монтировать на клиентских машинах.</p>
+
+<h2><a name="s4"></a>7.4 Создание карт автоматического монтирования на сервере LDAP</h2>
+<p class="place">Где работаем: <strong>ldap-srv</strong></p>
+<p>Теперь, когда сервер NFS настроен, мы должны добавить новую схему данных для автоматического монтирования в базу данных нашего сервера каталогов.  Самый простой способ её получить&thinsp;&mdash;&thinsp;установить пакет <strong>autofs-ldap</strong>:</p>
+<pre class="sh">#  apt-get install autofs-ldap</pre>
+<p>Искомая схема данных - <em>/etc/ldap/schema/autofs.schema</em>. Как Вы уже возможно догадались, прежде всего её надо перевести в формат LDIF. В <a href="init.html#s5">разделе 2.5</a> для этого мы использовали скрипт <em>2.5-schema-ldif.sh</em>. Схема <em>autofs.schema</em> зависит от схемы <em>core.schema</em>. Поэтому перед конвертацией надо добавить в итоговый <em>autofs.schema</em> директиву <code>include</code>. Выполним в консоли:</p>
+<pre class="sh">
+$  echo "include /etc/ldap/schema/core.schema" &gt; ~/ldap/autofs.schema
+$  cat /etc/ldap/schema/autofs.schema &gt;&gt; ~/ldap/autofs.schema
+$  SCHEMAS='autofs.schema' ~/ldap/2.5-schema-ldif.sh
+config file testing succeeded
+</pre>
+<p>Посмотрим содержимое получившегося LDIF. Он довольно короткий:</p>
+<pre class="sh">
+$  cat ~/ldap/autofs.ldif
+dn: cn=autofs,cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: autofs
+olcAttributeTypes: {0}( 1.3.6.1.1.1.1.25 NAME 'automountInformation' DESC 'Inf
+ ormation used by the autofs automounter' EQUALITY caseExactIA5Match SYNTAX 1.
+ 3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+olcObjectClasses: {0}( 1.3.6.1.1.1.1.13 NAME 'automount' DESC 'An entry in an 
+ automounter map' SUP top STRUCTURAL MUST ( cn $ automountInformation $ object
+ class ) MAY description )
+olcObjectClasses: {1}( 1.3.6.1.4.1.2312.4.2.2 NAME 'automountMap' DESC 'An gro
+ up of related automount objects' SUP top STRUCTURAL MUST ou )
+</pre>
+<p>Пeреместим его к остальным наборам схем:</p>
+<pre class="sh">#  mv autofs.ldif /etc/ldap/schema</pre>
+<p>Загрузим его в конфигурацию сервера каталогов:</p>
+<pre class="sh">
+$  ldapadd -xZZWD cn=admin,dc=example,dc=com  -f /etc/ldap/schema/autofs.ldif
+Enter LDAP Password:
+adding new entry "cn=autofs,cn=schema,cn=config"
+</pre>
+<p>Можем удостовериться в том, что схема данных загружена:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b cn=schema,cn=config dn | grep auto
+Enter LDAP Password:
+dn: cn={14}autofs,cn=schema,cn=config
+</pre>
+<p>Создадим файл конфигурации с картами автоматического монтирования (<em>7.4-autofs-map.ldif</em>):</p>
+<pre class="list">
+<code class="c"># Контейнер для конфигураций autofs</code>
+<code>dn: ou=autofs,ou=services,dc=example,dc=com</code>
+<code>ou: AutoFS</code>
+<code>objectClass: top</code>
+<code>objectClass: organizationalUnit</code>
+<code>description: Automount maps</code>
+<code></code>
+<code class="c"># Контейнер для карты auto.master</code>
+<code>dn: ou=auto.master,ou=autofs,ou=services,dc=example,dc=com</code>
+<code>ou: auto.master</code>
+<code>objectClass: top</code>
+<code>objectClass: automountMap</code>
+<code></code>
+<code class="c"># Точка монтирования /nfs</code>
+<code>dn: cn=/nfs,ou=auto.master,ou=autofs,ou=services,dc=example,dc=com</code>
+<code>cn: /nfs</code>
+<code>objectClass: top</code>
+<code>objectClass: automount</code>
+<code>automountInformation: ldap:ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com rsize=8192,wsize=8192</code>
+<code></code>
+<code class="c"># Контейнер для карты auto.nfs</code>
+<code>dn: ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com</code>
+<code>ou: auto.nfs</code>
+<code>objectClass: top</code>
+<code>objectClass: automountMap</code>
+<code></code>
+<code class="c"># Конфигурация дочерней точки монтирования home карты auto.nfs</code>
+<code>dn: cn=home,ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: automount</code>
+<code>cn: home</code>
+<code>automountInformation: nfs-srv.example.com:/export/home</code>
+<code></code>
+<code class="c"># Конфигурация дочерней точки монтирования install карты auto.nfs</code>
+<code>dn: cn=install,ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com</code>
+<code>objectClass: top</code>
+<code>objectClass: automount</code>
+<code>cn: install</code>
+<code>automountInformation: nfs-srv.example.com:/export/install</code>
+</pre>
+<p>И добавим новую информацию в службу каталогов:</p>
+<pre class="sh">$  ldapadd -xZZWD cn=admin,dc=example,dc=com  -f 7.4-autofs-map.ldif</pre>
+<p>Проверить сделанные изменения можно так:</p>
+<pre class="sh">
+$  ldapsearch -xZZLLLWD cn=admin,dc=example,dc=com -b ou=autofs,ou=services,dc=example,dc=com dn
+Enter LDAP Password:
+dn: ou=autofs,ou=services,dc=example,dc=com
+dn: ou=auto.master,ou=autofs,ou=services,dc=example,dc=com
+dn: cn=/nfs,ou=auto.master,ou=autofs,ou=services,dc=example,dc=com
+dn: ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com
+dn: cn=home,ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com
+dn: cn=install,ou=auto.nfs,ou=autofs,ou=services,dc=example,dc=com
+</pre>
+<p>Отлично! Теперь мы готовы настроить клиент для сервера NFS.</p>
+
+<h2><a name="s5"></a>7.5 Настройка клиента для сервера NFS</h2>
+<p class="place">Где работаем: <strong>ldap-client</strong></p>
+<p>В предыдущих разделах мы уже произвели интеграцию клиента с сервером каталогов. В этом разделе настроим на нём демон автоматического монтирования так, чтобы демон брал карты монтирования с сервера каталогов.</p>
+<p>Как всегда, для начала установим несколько пакетов:</p>
+<pre class="sh">#  apt-get install nfs-common nfs4-acl-tools autofs5 autofs5-ldap</pre>
+<p>Настроим демон, транслирующий UID/GID в имена и наоборот (<strong>rpc.idmapd</strong>) в файле <em>/etc/idmapd.conf</em>:</p>
+<pre class="list">
+<code>[General]</code>
+<code></code>
+<code>Verbosity = 0</code>
+<code>Pipefs-Directory = /run/rpc_pipefs</code>
+<code>Domain = example.com</code>
+<code></code>
+<code>[Mapping]</code>
+<code></code>
+<code>Nobody-User = nobody</code>
+<code>Nobody-Group = nogroup</code>
+<code></code>
+<code>[Translation]</code>
+<code></code>
+<code>Method = nsswitch</code>
+<code>GSS-Methods = nsswitch</code>
+</pre>
+<p>Добавим в <em>/etc/nsswitch.conf</em> строку:</p>
+<pre class="list">automount: ldap</pre>
+<p>Настроим демон автоматического монтирования в файле <em>/etc/default/autofs</em>:</p>
+<pre class="list">
+<code>TIMEOUT=300</code>
+<code>BROWSE_MODE="no"</code>
+<code>MOUNT_NFS_DEFAULT_PROTOCOL=4</code>
+<code class="c"># Измените LOGGING на "none", если собираетесь использовать конфигурацию в продакшене</code>
+<code>LOGGING="debug"</code>
+<code>LDAP_URI="ldap://ldap-srv.example.com"</code>
+<code>SEARCH_BASE="ou=autofs,ou=services,dc=example,dc=com"</code>
+<code>MAP_OBJECT_CLASS="automountMap"</code>
+<code>ENTRY_OBJECT_CLASS="automount"</code>
+<code>MAP_ATTRIBUTE="ou"</code>
+<code>ENTRY_ATTRIBUTE="cn"</code>
+<code>VALUE_ATTRIBUTE="automountInformation"</code>
+<code>USE_MISC_DEVICE="yes"</code>
+</pre>
+<p>Настроим аутентификацию демона автоматического монтирования в файле <em>/etc/autofs_ldap_auth.conf</em>:</p>
+<pre class="list">
+<code>&lt;?xml version="1.0" ?&gt;</code>
+<code> &lt;autofs_ldap_sasl_conf</code>
+<code>  usetls="yes"</code>
+<code>  tlsrequired="no"</code>
+<code>  authrequired="simple"</code>
+<code>  user="cn=nssproxy,ou=users,dc=example,dc=com"</code>
+<code>  secret="пароль.пользователя.nssproxy"</code>
+<code>/&gt;</code>
+<code class="c">&lt;!-- EOF --&gt;</code>
+</pre>
+<p>Снова прячем файл с аутентификационной информацией от посторонних глаз, иначе демон автоматического монтирования его не примет:</p>
+<pre class="sh">
+#  chmod 0600 /etc/autofs_ldap_auth.conf
+#  chown root:root /etc/autofs_ldap_auth.conf
+</pre>
+<p>Убедимся, что <strong>rpcbind</strong> стартует при загрузке системы и перезапустим его. То же самое сделаем с демоном <strong>autofs</strong>. Для корректной работы <strong>rpcbind</strong> лично мне пришлось перезагрузить клиентскую рабочую станцию. Вывод убран для краткости:</p>
+<pre class="sh">
+#  update-rc.d rpcbind defaults
+#  service rpcbind restart
+#  update-rc.d autofs defaults
+#  service autofs restart
+</pre>
+<p>Проверьте файлы журналов сервера (<strong>nfs-srv</strong>) и клиента (<strong>ldap-client</strong>). Если всё в порядке, можно проверять созданную нами конфигурацию на клиентской машине:</p>
+<pre class="sh">
+$  ls -a /nfs/
+.  ..
+$  cd /nfs/home
+$  pwd
+/nfs/home
+$  cd /nfs/install
+$  pwd
+/nfs/install
+$  ls -a /nfs
+.  ..  home  install
+$ df -h /nfs/home
+Файл.система                     Размер Использовано  Дост Использовано% Cмонтировано в
+nfs-srv.example.com:/export/home   3,6G         1,6G  1,8G           47% /nfs/home
+$ df -h /nfs/install
+Файл.система                        Размер Использовано  Дост Использовано% Cмонтировано в
+nfs-srv.example.com:/export/install   3,6G         1,6G  1,8G           47% /nfs/install
+</pre>
+<p>Если Вы видите похожий вывод, то цель достигнута!</p>
+
+<p class="nav"><a href="index.html">OpenLDAP и Ubuntu на практике</a> > OpenLDAP как хранилище карт автоматического монтирования для autofs</p>
+<div class="about"><a href="http://pro-ldap.ru">Pro-LDAP.ru</a> 2015 г. Последнее изменение страницы&thinsp;&mdash;&thinsp;3 мая 2015 г. Вопросы и предложения принимаются на <a href="http://pro-ldap.ru/forum/index.php?topic=295.0">форуме проекта</a>.</div>
+</body></html>
