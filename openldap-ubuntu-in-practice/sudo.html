@@ -35,7 +35,7 @@ $  cd ~/sudo
 <p>Для конвертации этого файла в LDIF воспользуемся скриптом <em>/usr/share/doc/sudo-ldap/sudoers2ldif.gz</em> из пакета <strong>sudo-ldap</strong>:</p>
 <pre class="sh">
 $  zcat /usr/share/doc/sudo-ldap/sudoers2ldif.gz &gt; 6.1-sudoers2ldif
-$  SUDOERS_BASE=ou=sudo,ou=services,dc=example,dc=com perl 6.1-sudoers2ldif 6.1-sudoers.source &gt; sudoers.ldif
+$  SUDOERS_BASE=ou=sudo,ou=services,dc=example,dc=com perl 6.1-sudoers2ldif 6.1-sudoers.source &gt; 6.1-sudoers.ldif
 </pre>
 <p>Между прочим, можно и не создавать отдельный файл <strong>6.1-sudoers.source</strong>, а просто в последней команде вместо него указать Ваш текущий <strong>/etc/sudoers</strong>. Таким образом Вы преобразуете в LDIF свою любимую конфигурацию. :)</p>
 <p>Итак, у нас теперь есть <strong>sudoers</strong> в формате LDIF. Но в нашей службе каталогов нет контейнера для правил <strong>sudo</strong>! У нас, в сущности, даже нет контейнера для служб. Поэтому добавим в начало получившегося у нас <em>6.1-sudoers.ldif</em> несколько строк для контейнера служб (первый блок строк) и входящего в него контейнера правил <strong>sudo</strong> (второй блок строк). Итоговый файл <em>6.1-sudoers.ldif</em> для <em>6.1-sudoers.source</em> будет выглядеть так:</p>
